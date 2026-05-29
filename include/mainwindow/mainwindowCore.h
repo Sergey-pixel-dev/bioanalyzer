@@ -1,0 +1,4 @@
+#ifndef MAINWINDOWCORE_H
+#define MAINWINDOWCORE_H
+
+#endif // MAINWINDOWCORE_H
