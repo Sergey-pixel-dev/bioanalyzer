@@ -1,0 +1,26 @@
+cmake_minimum_required(VERSION 3.16)
+project(app VERSION 1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_SOURCE_DIR}/ui)
+
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)
+file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS include/*.h)
+file(GLOB_RECURSE UI_FILES CONFIGURE_DEPENDS ui/*.ui)
+
+add_executable(${PROJECT_NAME}
+    ${SOURCES}
+    ${HEADERS}
+    ${UI_FILES}
+)
+
+target_include_directories(${PROJECT_NAME} PRIVATE include)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets)
