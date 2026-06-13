@@ -1,0 +1,4 @@
+#ifndef DEVICESESSION_H
+#define DEVICESESSION_H
+
+#endif // DEVICESESSION_H

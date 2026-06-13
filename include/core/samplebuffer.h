@@ -1,0 +1,4 @@
+#ifndef SAMPLEBUFFER_H
+#define SAMPLEBUFFER_H
+
+#endif // SAMPLEBUFFER_H

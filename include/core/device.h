@@ -1,24 +1,19 @@
 #ifndef DEVICE_H
 #define DEVICE_H
-
-#include <fcntl.h>
-#include <termios.h>
-#include <unistd.h>
 #include <cstdint>
-typedef struct
-{
-    char name[32];
-    char description[128];
-} DeviceInfo;
+#include <fcntl.h>
+#include <unistd.h>
+#include <termios.h>
 class Device
 {
 public:
-    int fd = -1;
-    char sysname[32] = {0};
-    DeviceInfo dinfo;
-    int DeviceOpen();
-    int DeviceClose();
-    int DeviceWrite(uint8_t *buf, int n);
-    int DeviceRead(uint8_t *buf, int n, int timeout = 50); // timeout в мс
+    int fd;
+    char sysname[32];
+    int open();
+    int close();
+    int write(const uint8_t *buf, int length);
+    int read(uint8_t *buf, int length);
+    Device();
+    ~Device();
 };
-#endif
+#endif // DEVICE_H

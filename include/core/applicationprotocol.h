@@ -1,0 +1,6 @@
+#ifndef APPLICATIONPROTOCOL_H
+#define APPLICATIONPROTOCOL_H
+class ApplicationProtocol
+{
+};
+#endif // APPLICATIONPROTOCOL_H
