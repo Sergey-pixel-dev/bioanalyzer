@@ -5,10 +5,9 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <functional>
 
 #include "core/transportprotocol.h"
-#include "core/ecgadcprotocol.h"
+#include "core/applicationprotocol.h"
 #include "core/samplebuffer.h"
 #include "core/sessionrecord.h"
 #include "core/datahub.h"
@@ -21,8 +20,8 @@ class ITransport;
 // This is the core-side session object. It is Qt-free and single-threaded
 // from its own perspective: poll() is meant to be pumped by an owner (a Qt
 // worker thread via the adapter, or a test loop). Decoded sample frames land
-// in the SampleBuffer and, when recording, in the SessionWriter; an optional
-// callback also forwards them for live consumers.
+// in the SampleBuffer and, when recording, in the SessionWriter. Live samples
+// are published through the required DataHub in short time-based batches.
 //
 // The transport is injected, so the same session works over a real serial
 // Device or a PhantomDevice for playback.
@@ -42,7 +41,7 @@ public:
     {
         std::string port;
         int baud = 921600;
-        EcgAdcProtocol::DeviceInfo info;
+        ApplicationProtocol::DeviceInfo info;
     };
 
     enum class ProbeStatus
@@ -58,7 +57,7 @@ public:
     struct ProbeResult
     {
         ProbeStatus status = ProbeStatus::Timeout;
-        EcgAdcProtocol::DeviceInfo info;
+        ApplicationProtocol::DeviceInfo info;
         uint8_t errorCode = 0;
         int attempts = 0;
 
@@ -70,19 +69,15 @@ public:
     // a worker thread so the GUI remains responsive.
     static std::vector<PortInfo> discoverPorts();
     static ProbeResult probePortDetailed(const std::string &portPath, int baud = 921600,
-                                         int timeoutMs = 650, int maxAttempts = 3);
-    // Compatibility wrapper for callers that need a single probe attempt.
-    static bool probePort(const std::string &portPath, int baud, int timeoutMs,
-                          EcgAdcProtocol::DeviceInfo &out);
+                                         int timeoutMs = 1200, int maxAttempts = 3);
     static std::vector<DiscoveredDevice> scanDevices(int baud = 921600,
-                                                     int timeoutMs = 650,
+                                                     int timeoutMs = 1200,
                                                      int maxAttempts = 3);
 
-    // Called (on the poll thread) whenever a fresh sample frame is decoded.
-    using SampleCallback = std::function<void(const EcgAdcProtocol::SampleFrame &)>;
-
     // `transport` is borrowed (not owned) unless ownTransport is true.
-    DeviceSession(ITransport *transport, bool ownTransport = false);
+    // `dataHub` is required: all decoded samples leave the session through
+    // this bus.
+    DeviceSession(ITransport *transport, DataHub *dataHub, bool ownTransport = false);
     ~DeviceSession();
 
     // Rolling buffer sizing (samples kept per channel). Default ~60 s @ 4 kHz.
@@ -95,36 +90,31 @@ public:
     // Pump the transport parser. Returns bytes read (>=0) or <0 on error.
     int poll();
 
-    // Protocol commands (thin pass-through to EcgAdcProtocol).
-    int startStream(const std::vector<uint8_t> &channels, EcgAdcProtocol::AckHandler onAck = {});
-    int stopStream(EcgAdcProtocol::AckHandler onAck = {});
-    // Compatibility command only; ADS1298 reference remains fixed at 2.4 V.
-    int setVref(uint16_t mV, EcgAdcProtocol::AckHandler onAck = {});
-    int setSamplerate(uint8_t idx, EcgAdcProtocol::AckHandler onAck = {});
-    int setGain(uint8_t channel, uint8_t gainCode, EcgAdcProtocol::AckHandler onAck = {});
-    // Global, mutually-exclusive ADS1298 input modes. setShortInput(false)
-    // remains a compatibility alias for setNormalInput().
-    int setShortInput(bool enable, EcgAdcProtocol::AckHandler onAck = {});
-    int setNormalInput(EcgAdcProtocol::AckHandler onAck = {});
-    int setTestSignal(uint8_t amplitude, uint8_t frequency, EcgAdcProtocol::AckHandler onAck = {});
-    int getDeviceInfo(EcgAdcProtocol::DeviceInfoHandler onInfo = {});
+    // Protocol commands (thin pass-through to ApplicationProtocol).
+    int startStream(const std::vector<uint8_t> &channels, ApplicationProtocol::AckHandler onAck = {});
+    int stopStream(ApplicationProtocol::AckHandler onAck = {});
+    int setSamplerate(uint8_t idx, ApplicationProtocol::AckHandler onAck = {});
+    int setGain(uint8_t channel, uint8_t gainCode, ApplicationProtocol::AckHandler onAck = {});
+    // Global, mutually-exclusive ADS1298 input modes.
+    int setShortInput(ApplicationProtocol::AckHandler onAck = {});
+    int setNormalInput(ApplicationProtocol::AckHandler onAck = {});
+    int setTestSignal(uint8_t amplitude, uint8_t frequency, ApplicationProtocol::AckHandler onAck = {});
+    int getDeviceInfo(ApplicationProtocol::DeviceInfoHandler onInfo = {});
 
     // Current geometry.
     const std::vector<uint8_t> &activeChannels() const { return m_app.activeChannels(); }
     int sampleRateHz() const { return m_sampleRateHz; }
     void setSampleRateHz(int hz) { m_sampleRateHz = hz; }
     // ADS1298 uses the internal, fixed 2.4 V reference.
-    uint16_t vrefMv() const { return EcgAdcProtocol::kFixedReferenceVoltageMv; }
+    uint16_t vrefMv() const { return ApplicationProtocol::kFixedReferenceVoltageMv; }
 
     SampleBuffer &buffer() { return m_buffer; }
     const SampleBuffer &buffer() const { return m_buffer; }
 
-    void setSampleCallback(SampleCallback cb) { m_sampleCb = std::move(cb); }
-    void setDataHub(DataHub *hub) { m_dataHub = hub; }
-
-    // Recording. Records every active channel; disabled channels are the
-    // caller's concern (they fill placeholder data before recording). Returns
-    // false if a recording is already active or the file can't be opened.
+    // Recording. The active physical channel set comes from the successful
+    // StartStream command; the supplied descriptors only provide optional
+    // labels/metadata for those channels. Returns false if no stream is
+    // active, a recording is already open, or the file cannot be opened.
     bool startRecording(const std::string &path, const std::string &description,
                         const std::vector<ChannelInfo> &channels);
     void stopRecording();
@@ -132,21 +122,27 @@ public:
     uint64_t recordedSamples() const { return m_writer ? m_writer->sampleCount() : 0; }
 
 private:
-    void onSamples(const EcgAdcProtocol::SampleFrame &frame);
+    void onSamples(const ApplicationProtocol::SampleFrame &frame);
+    void resetPublishBatch();
+    void publishPending(size_t count);
+    void flushPublishedSamples();
 
     ITransport *m_transport = nullptr;
     bool m_ownTransport = false;
     TransportProtocol m_transportProto;
-    EcgAdcProtocol m_app;
+    ApplicationProtocol m_app;
     SampleBuffer m_buffer;
     std::unique_ptr<SessionWriter> m_writer;
-    std::vector<ChannelInfo> m_recordingChannels;
 
-    SampleCallback m_sampleCb;
-    DataHub *m_dataHub = nullptr; // borrowed
+    DataHub *m_dataHub = nullptr; // required, borrowed
+    std::vector<std::vector<int32_t>> m_publishPending;
+    std::vector<uint8_t> m_publishChannels;
+    uint64_t m_publishFirstSample = 0;
+    size_t m_publishPendingSamples = 0;
+    uint8_t m_publishLastSequence = 0;
     uint64_t m_totalSamples = 0;
     size_t m_bufferCapacity = 4000 * 60; // 60 s @ 4 kHz
-    int m_sampleRateHz = EcgAdcProtocol::kSampleRateHz[EcgAdcProtocol::kDefaultSampleRateIndex];
+    int m_sampleRateHz = ApplicationProtocol::kSampleRateHz[ApplicationProtocol::kDefaultSampleRateIndex];
 };
 
 #endif // DEVICESESSION_H

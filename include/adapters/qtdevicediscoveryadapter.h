@@ -31,7 +31,7 @@ public:
     bool isScanning() const { return m_scanning; }
 
 public slots:
-    void scan(int baud = 921600, int timeoutMs = 650, int maxAttempts = 3);
+    void scan(int baud = 921600, int timeoutMs = 1200, int maxAttempts = 3);
 
 signals:
     void scanStarted();

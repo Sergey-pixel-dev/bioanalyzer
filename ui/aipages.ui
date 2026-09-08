@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>AiPagesForm</class>
+ <widget class="QWidget" name="AiPagesForm">
+  <property name="windowTitle"><string>AI</string></property>
+  <layout class="QVBoxLayout" name="rootLayout"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

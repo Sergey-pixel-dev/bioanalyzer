@@ -1,0 +1,21 @@
+{
+  "schema_version": 3,
+  "task_id": "regression",
+  "display_name": "Continuous value regression",
+  "task_type": "regression",
+  "target_type": "value",
+  "paradigm": {
+    "kind": "free_recording",
+    "duration_s": 7,
+    "randomize": false
+  },
+  "events": [],
+  "capture": {
+    "channels": [],
+    "sample_rate": 250,
+    "window_samples": 1750,
+    "stride_samples": 1750,
+    "units": "uV",
+    "scale": 0.000001
+  }
+}

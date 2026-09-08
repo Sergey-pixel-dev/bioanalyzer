@@ -14,7 +14,7 @@
 // Virtual device that behaves like the real ECG/ADC MCU over SerProt.
 //
 // It implements ITransport, so the exact same TransportProtocol +
-// EcgAdcProtocol stack drives it — nothing above the transport layer knows
+// ApplicationProtocol stack drives it — nothing above the transport layer knows
 // whether it is talking to real hardware or this phantom. That keeps the
 // playback path identical to the live path.
 //

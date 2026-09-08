@@ -7,19 +7,25 @@
 
 namespace
 {
-QString probeStatusText(DeviceSession::ProbeStatus status)
-{
-    switch (status)
+    QString probeStatusText(DeviceSession::ProbeStatus status)
     {
-    case DeviceSession::ProbeStatus::OpenFailed: return QStringLiteral("open failed");
-    case DeviceSession::ProbeStatus::Timeout: return QStringLiteral("timeout");
-    case DeviceSession::ProbeStatus::InvalidResponse: return QStringLiteral("invalid device info");
-    case DeviceSession::ProbeStatus::ProtocolError: return QStringLiteral("device error");
-    case DeviceSession::ProbeStatus::TransportError: return QStringLiteral("transport/CRC error");
-    case DeviceSession::ProbeStatus::Success: return QStringLiteral("success");
+        switch (status)
+        {
+        case DeviceSession::ProbeStatus::OpenFailed:
+            return QStringLiteral("open failed");
+        case DeviceSession::ProbeStatus::Timeout:
+            return QStringLiteral("timeout");
+        case DeviceSession::ProbeStatus::InvalidResponse:
+            return QStringLiteral("invalid device info");
+        case DeviceSession::ProbeStatus::ProtocolError:
+            return QStringLiteral("device error");
+        case DeviceSession::ProbeStatus::TransportError:
+            return QStringLiteral("transport/CRC error");
+        case DeviceSession::ProbeStatus::Success:
+            return QStringLiteral("success");
+        }
+        return QStringLiteral("unknown");
     }
-    return QStringLiteral("unknown");
-}
 } // namespace
 
 QtDeviceDiscoveryAdapter::QtDeviceDiscoveryAdapter(QObject *parent)
@@ -100,7 +106,6 @@ void QtDeviceDiscoveryAdapter::scan(int baud, int timeoutMs, int maxAttempts)
                                                 result.devices.push_back(std::move(device));
                                             }
                                         }
-                                        return result;
-                                    });
+                                        return result; });
     watcher->setFuture(future);
 }

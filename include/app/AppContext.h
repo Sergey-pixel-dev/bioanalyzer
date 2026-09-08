@@ -9,6 +9,8 @@ class QtDeviceDiscoveryAdapter;
 class QtDeviceSessionAdapter;
 class QtAiWorkerAdapter;
 class DataHub;
+class AcquisitionService;
+class ThemeManager;
 
 // Shared application state passed to the pages.
 //
@@ -20,7 +22,6 @@ class AppContext : public QObject
 {
     Q_OBJECT
 public:
-    enum class AcquisitionMode { Idle, Monitoring, DatasetCapture, Inference, Playback };
     explicit AppContext(QObject *parent = nullptr);
     ~AppContext() override;
 
@@ -28,7 +29,8 @@ public:
     QtDeviceSessionAdapter *session() const { return m_session; }
     DataHub *dataHub() const { return m_dataHub; }
     QtAiWorkerAdapter *aiWorker() const { return m_aiWorker; }
-    AcquisitionMode acquisitionMode() const { return m_mode; }
+    AcquisitionService *acquisition() const { return m_acquisition; }
+    ThemeManager *themeManager() const { return m_themeManager; }
     const QStringList &recentDatasets() const { return m_recentDatasets; }
     const QStringList &recentModels() const { return m_recentModels; }
     void rememberDataset(const QString &path);
@@ -37,19 +39,17 @@ public:
     // Replace the current session adapter. Takes ownership. The previous
     // session is deleted after emitting sessionChanged().
     void setSession(QtDeviceSessionAdapter *session);
-    bool acquireMode(AcquisitionMode mode);
-    void releaseMode(AcquisitionMode mode);
 
 signals:
     void sessionChanged(QtDeviceSessionAdapter *session);
-    void acquisitionModeChanged(AppContext::AcquisitionMode mode);
 
 private:
     QtDeviceDiscoveryAdapter *m_discovery = nullptr;
     QtDeviceSessionAdapter *m_session = nullptr;
     DataHub *m_dataHub = nullptr;
     QtAiWorkerAdapter *m_aiWorker = nullptr;
-    AcquisitionMode m_mode = AcquisitionMode::Idle;
+    AcquisitionService *m_acquisition = nullptr;
+    ThemeManager *m_themeManager = nullptr;
     QStringList m_recentDatasets;
     QStringList m_recentModels;
 };

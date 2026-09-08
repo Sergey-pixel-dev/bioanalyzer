@@ -1,0 +1,22 @@
+{
+  "schema_version": 3,
+  "task_id": "gesture-classification",
+  "display_name": "Gesture classification",
+  "task_type": "classification",
+  "target_type": "label",
+  "paradigm": {
+    "kind": "cue_schedule",
+    "prep_s": 5,
+    "record_s": 5,
+    "randomize": true
+  },
+  "events": [],
+  "capture": {
+    "channels": [],
+    "sample_rate": 2000,
+    "window_samples": 10000,
+    "stride_samples": 10000,
+    "units": "uV",
+    "scale": 0.000001
+  }
+}

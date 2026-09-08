@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MonitoringPageForm</class>
+ <widget class="QWidget" name="MonitoringPageForm">
+  <property name="windowTitle"><string>Monitoring</string></property>
+  <layout class="QVBoxLayout" name="rootLayout"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

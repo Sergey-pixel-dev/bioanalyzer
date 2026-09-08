@@ -50,11 +50,17 @@ SessionWriter::~SessionWriter()
 
 bool SessionWriter::open(const std::string &path, const SessionHeader &header)
 {
+    if (header.version != 2 || header.channels.empty() || header.channels.size() > 8)
+        return false;
     m_file.open(path, std::ios::binary | std::ios::out | std::ios::trunc);
     if (!m_file.is_open())
         return false;
 
     m_channels = static_cast<int>(header.channels.size());
+    m_physicalChannels.clear();
+    m_physicalChannels.reserve(header.channels.size());
+    for (const ChannelInfo &channel : header.channels)
+        m_physicalChannels.push_back(channel.physIndex);
     m_sampleCount = 0;
 
     m_file.write("BSIG", 4);
@@ -92,7 +98,14 @@ void SessionWriter::writeSampleSet(const std::vector<int32_t> &values)
 
 void SessionWriter::writeBlock(const std::vector<std::vector<int32_t>> &samples)
 {
-    if (!m_file.is_open() || static_cast<int>(samples.size()) != m_channels || m_channels == 0)
+    writeBlock(m_physicalChannels, samples);
+}
+
+void SessionWriter::writeBlock(const std::vector<uint8_t> &channels,
+                               const std::vector<std::vector<int32_t>> &samples)
+{
+    if (!m_file.is_open() || channels != m_physicalChannels ||
+        static_cast<int>(samples.size()) != m_channels || m_channels == 0)
         return;
     const size_t n = samples[0].size();
     for (int c = 1; c < m_channels; ++c)
@@ -137,6 +150,11 @@ bool SessionReader::open(const std::string &path)
         !readLE<uint16_t>(m_file, channels) ||
         !readLE<uint32_t>(m_file, m_header.sampleRate) ||
         !readLE<uint16_t>(m_file, m_header.vrefMv))
+    {
+        m_file.close();
+        return false;
+    }
+    if (m_header.version != 2 || channels == 0 || channels > 8)
     {
         m_file.close();
         return false;

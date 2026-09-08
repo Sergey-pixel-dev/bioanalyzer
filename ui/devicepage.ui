@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>DevicePageForm</class>
+ <widget class="QWidget" name="DevicePageForm">
+  <property name="windowTitle"><string>Devices</string></property>
+  <layout class="QVBoxLayout" name="rootLayout"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

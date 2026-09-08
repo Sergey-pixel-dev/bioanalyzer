@@ -1,31 +1,52 @@
 #ifndef DATASETCAPTURE_H
 #define DATASETCAPTURE_H
+
 #include "core/datahub.h"
-#include <QObject>
-#include <QString>
-#include <deque>
 #include "core/dataset.h"
-class DatasetCaptureController : public QObject
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <string>
+#include <vector>
+#include <utility>
+
+// Qt-free engine for cue-driven dataset capture. The engine subscribes to the
+// shared DataHub and reports state through standard-library callbacks.
+class DatasetCaptureEngine
 {
-    Q_OBJECT
 public:
-    explicit DatasetCaptureController(DataHub *hub=nullptr, QObject *parent=nullptr); ~DatasetCaptureController() override;
-    bool start(const std::string &dir,const DatasetSpec &spec,const std::vector<std::string>&labels,int repetitions=1,int prepSeconds=5,int recordSeconds=7);
-    void stop(); bool running() const{return m_running;}
-signals:
-    void progress(int labelIndex, int repetition, double seconds, const QString &label);
-    void completed(bool stopped);
+    using ProgressCallback = std::function<void(int labelIndex, int repetition,
+                                                  double seconds,
+                                                  const std::string &label)>;
+    using CompletedCallback = std::function<void(bool stopped)>;
+
+    explicit DatasetCaptureEngine(DataHub *hub = nullptr);
+    ~DatasetCaptureEngine();
+
+    void setProgressCallback(ProgressCallback callback) { m_progress = std::move(callback); }
+    void setCompletedCallback(CompletedCallback callback) { m_completed = std::move(callback); }
+
+    bool start(const std::string &directory, const DatasetSpec &spec,
+               const std::vector<std::string> &labels, int repetitions = 1);
+    void stop();
+    bool running() const { return m_running; }
+
 private:
-    void onBlock(const DataHub::Block&);
-    DataHub *m_hub;
-    uint64_t m_token = 0, m_seen = 0;
+    void onBlock(const DataHub::Block &block);
+
+    DataHub *m_hub = nullptr;
+    uint64_t m_token = 0;
+    uint64_t m_seen = 0;
     bool m_running = false;
-    int m_prep = 5, m_duration = 7, m_repetition = 0, m_repetitions = 1;
+    int m_prep = 5;
+    int m_duration = 7;
+    int m_repetitions = 1;
     std::vector<std::string> m_labels;
-    DatasetWriter m_writer;
+    std::unique_ptr<Dataset> m_dataset;
     DatasetSpec m_spec;
-    // Push blocks are not guaranteed to contain a complete training window.
-    // Retain the recent samples so examples can span block boundaries.
     std::vector<std::deque<int32_t>> m_history;
+    ProgressCallback m_progress;
+    CompletedCallback m_completed;
 };
+
 #endif

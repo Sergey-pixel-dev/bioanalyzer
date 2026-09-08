@@ -25,6 +25,37 @@
 
 #include "qcustomplot.h"
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+namespace
+{
+QDateTime qcpDateTimeWithSpec(const QDateTime &dateTime, Qt::TimeSpec spec)
+{
+  switch (spec)
+  {
+    case Qt::UTC:
+      return dateTime.toUTC();
+    case Qt::LocalTime:
+      return dateTime.toLocalTime();
+    case Qt::OffsetFromUTC:
+      return dateTime.toOffsetFromUtc(dateTime.offsetFromUtc());
+    case Qt::TimeZone:
+      break;
+  }
+  return dateTime;
+}
+
+QImage qcpFlipped(const QImage &image, bool horizontal, bool vertical)
+{
+  Qt::Orientations orientations;
+  if (horizontal)
+    orientations |= Qt::Horizontal;
+  if (vertical)
+    orientations |= Qt::Vertical;
+  return image.flipped(orientations);
+}
+}
+#endif
+
 
 /* including file 'src/vector2d.cpp'       */
 /* modified 2022-11-06T12:45:56, size 7973 */
@@ -6723,7 +6754,11 @@ QString QCPAxisTickerDateTime::getTickLabel(double tick, const QLocale &locale, 
   if (mDateTimeSpec == Qt::TimeZone)
     return locale.toString(keyToDateTime(tick).toTimeZone(mTimeZone), mDateTimeFormat);
   else
+#  if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    return locale.toString(qcpDateTimeWithSpec(keyToDateTime(tick), mDateTimeSpec), mDateTimeFormat);
+#  else
     return locale.toString(keyToDateTime(tick).toTimeSpec(mDateTimeSpec), mDateTimeFormat);
+#  endif
 # else
   return locale.toString(keyToDateTime(tick).toTimeSpec(mDateTimeSpec), mDateTimeFormat);
 # endif
@@ -6828,7 +6863,16 @@ double QCPAxisTickerDateTime::dateTimeToKey(const QDate &date, Qt::TimeSpec time
 # elif QT_VERSION < QT_VERSION_CHECK(5, 14, 0)
   return QDateTime(date, QTime(0, 0), timeSpec).toMSecsSinceEpoch()/1000.0;
 # else
-  return date.startOfDay(timeSpec).toMSecsSinceEpoch()/1000.0;
+#  if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  QTimeZone timeZone = QTimeZone::LocalTime;
+  if (timeSpec == Qt::UTC)
+    timeZone = QTimeZone::UTC;
+  else if (timeSpec == Qt::OffsetFromUTC)
+    timeZone = QTimeZone::fromSecondsAheadOfUtc(0);
+  return QDateTime(date, QTime(0, 0), timeZone).toMSecsSinceEpoch()/1000.0;
+#  else
+  return QDateTime(date, QTime(0, 0), timeSpec).toMSecsSinceEpoch()/1000.0;
+#  endif
 # endif
 }
 /* end of 'src/axis/axistickerdatetime.cpp' */
@@ -20619,7 +20663,7 @@ void QCPColorScaleAxisRectPrivate::draw(QCPPainter *painter)
     mirrorVert = mParentColorScale->mColorAxis.data()->rangeReversed() && (mParentColorScale->type() == QCPAxis::atLeft || mParentColorScale->type() == QCPAxis::atRight);
   }
   
-  painter->drawImage(rect().adjusted(0, -1, 0, -1), mGradientImage.mirrored(mirrorHorz, mirrorVert));
+  painter->drawImage(rect().adjusted(0, -1, 0, -1), qcpFlipped(mGradientImage, mirrorHorz, mirrorVert));
   QCPAxisRect::draw(painter);
 }
 
@@ -26657,7 +26701,7 @@ void QCPColorMap::updateLegendIcon(Qt::TransformationMode transformMode, const Q
   {
     bool mirrorX = (keyAxis()->orientation() == Qt::Horizontal ? keyAxis() : valueAxis())->rangeReversed();
     bool mirrorY = (valueAxis()->orientation() == Qt::Vertical ? valueAxis() : keyAxis())->rangeReversed();
-    mLegendIcon = QPixmap::fromImage(mMapImage.mirrored(mirrorX, mirrorY)).scaled(thumbSize, Qt::KeepAspectRatio, transformMode);
+    mLegendIcon = QPixmap::fromImage(qcpFlipped(mMapImage, mirrorX, mirrorY)).scaled(thumbSize, Qt::KeepAspectRatio, transformMode);
   }
 }
 
@@ -26885,7 +26929,7 @@ void QCPColorMap::draw(QCPPainter *painter)
                                   coordsToPixels(mMapData->keyRange().upper, mMapData->valueRange().upper)).normalized();
     localPainter->setClipRect(tightClipRect, Qt::IntersectClip);
   }
-  localPainter->drawImage(imageRect, mMapImage.mirrored(mirrorX, mirrorY));
+  localPainter->drawImage(imageRect, qcpFlipped(mMapImage, mirrorX, mirrorY));
   if (mTightBoundary)
     localPainter->setClipRegion(clipBackup);
   localPainter->setRenderHint(QPainter::SmoothPixmapTransform, smoothBackup);
@@ -30310,7 +30354,7 @@ void QCPItemPixmap::updateScaledPixmap(QRect finalRect, bool flipHorz, bool flip
     {
       mScaledPixmap = mPixmap.scaled(finalRect.size()*devicePixelRatio, mAspectRatioMode, mTransformationMode);
       if (flipHorz || flipVert)
-        mScaledPixmap = QPixmap::fromImage(mScaledPixmap.toImage().mirrored(flipHorz, flipVert));
+        mScaledPixmap = QPixmap::fromImage(qcpFlipped(mScaledPixmap.toImage(), flipHorz, flipVert));
 #ifdef QCP_DEVICEPIXELRATIO_SUPPORTED
       mScaledPixmap.setDevicePixelRatio(devicePixelRatio);
 #endif
@@ -35525,5 +35569,3 @@ QVector<QPointF> QCPPolarGraph::dataToLines(const QVector<QCPGraphData> &data) c
   return result;
 }
 /* end of 'src/polar/polargraph.cpp' */
-
-

@@ -32,7 +32,7 @@ void SampleBuffer::pushSampleSet(const std::vector<int32_t> &values)
     for (int c = 0; c < m_channels; ++c)
     {
         m_data[c][m_head[c]] = values[c];
-        m_head[c] = (m_head[c] + 1) % m_capacity;
+        m_head[c] = (m_head[c] + 1) % m_capacity; // вот так просто ring реализуем, без всяких if-ов
         ++m_total[c];
     }
 }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>CueCaptureDialogForm</class>
+ <widget class="QDialog" name="CueCaptureDialogForm">
+  <property name="windowTitle"><string>Capture</string></property>
+  <property name="minimumSize"><size><width>420</width><height>300</height></size></property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item><widget class="QLabel" name="phaseLabel"><property name="text"><string>Waiting</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="styleSheet"><string notr="true">font-size: 22pt; font-weight: bold;</string></property></widget></item>
+   <item><widget class="QLabel" name="countdownLabel"><property name="text"><string>-</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="styleSheet"><string notr="true">font-size: 42pt; font-weight: bold;</string></property></widget></item>
+   <item><widget class="QLabel" name="cycleLabel"><property name="text"><string>Cycle 0 of 0</string></property><property name="alignment"><set>Qt::AlignCenter</set></property></widget></item>
+   <item><widget class="QTableWidget" name="remainingTable"><property name="columnCount"><number>2</number></property><property name="rowCount"><number>0</number></property><column><property name="text"><string>Gesture</string></property></column><column><property name="text"><string>Remaining</string></property></column></widget></item>
+   <item><widget class="QPushButton" name="stopButton"><property name="text"><string>Stop</string></property></widget></item>
+  </layout>
+ </widget>
+ <resources/><connections/>
+</ui>

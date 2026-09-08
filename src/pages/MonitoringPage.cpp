@@ -1,10 +1,13 @@
 #include "pages/MonitoringPage.h"
 
 #include "app/AppContext.h"
+#include "app/acquisitionservice.h"
+#include "app/thememanager.h"
 #include "adapters/qtdevicesessionadapter.h"
-#include "core/ecgadcprotocol.h"
+#include "core/applicationprotocol.h"
 #include "dsp/spectrum.h"
 #include "qcustomplot.h"
+#include "ui_monitoringpage.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -21,6 +24,9 @@
 #include <QLabel>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QSplitter>
+#include <QSettings>
+#include <QSignalBlocker>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
@@ -33,18 +39,29 @@
 #include <QEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
+#include <QDropEvent>
+#include <QDrag>
+#include <QMimeData>
+#include <QPainter>
+#include <QFont>
 #include <QtAlgorithms>
 #include <algorithm>
+#include <functional>
 
 namespace
 {
     // A small palette so stacked channels are visually distinct.
-    QColor channelColor(int i)
+    QColor channelColor(int i, bool dark)
     {
-        static const QColor palette[] = {
-            QColor(0, 114, 189), QColor(217, 83, 25), QColor(237, 177, 32),
-            QColor(126, 47, 142), QColor(119, 172, 48), QColor(77, 190, 238),
-            QColor(162, 20, 47), QColor(0, 150, 136)};
+        static const QColor darkPalette[] = {
+            QColor(80, 180, 255), QColor(255, 130, 80), QColor(255, 205, 70),
+            QColor(190, 125, 235), QColor(145, 220, 90), QColor(100, 215, 240),
+            QColor(245, 100, 125), QColor(70, 220, 180)};
+        static const QColor lightPalette[] = {
+            QColor(0, 90, 160), QColor(190, 65, 15), QColor(170, 115, 0),
+            QColor(105, 35, 125), QColor(55, 125, 20), QColor(0, 120, 165),
+            QColor(145, 15, 40), QColor(0, 110, 95)};
+        const QColor *palette = dark ? darkPalette : lightPalette;
         return palette[i % 8];
     }
 
@@ -64,8 +81,180 @@ namespace
             return QProxyStyle::styleHint(hint, option, widget, ret);
         }
     };
-}
 
+    class FilterTableWidget final : public QTableWidget
+    {
+    public:
+        using QTableWidget::QTableWidget;
+        std::function<void()> orderChanged;
+
+    protected:
+        void startDrag(Qt::DropActions supportedActions) override
+        {
+            m_dragRow = currentRow();
+            if (m_dragRow < 0 || m_dragRow >= rowCount())
+                return;
+
+            QModelIndexList indexes = selectedIndexes();
+            // Cell widgets can leave the selection model empty even though
+            // the user started dragging a visible row. The name item is the
+            // canonical drag payload in that case.
+            if (indexes.isEmpty())
+                indexes.push_back(model()->index(m_dragRow, 1));
+
+            auto *drag = new QDrag(this);
+            drag->setMimeData(model()->mimeData(indexes));
+
+            // QTableWidget's default drag pixmap omits text/items when rows
+            // contain cell widgets. Build a small, opaque row preview instead
+            // of rendering the viewport: this keeps the filter name visible
+            // even while Qt hides the source row during the drag.
+            const int rowHeight = std::max(28, this->rowHeight(m_dragRow));
+            const int previewWidth = std::max(240, columnWidth(1) + 24);
+            QPixmap pixmap(previewWidth, rowHeight);
+            const QColor background = palette().color(QPalette::Base);
+            pixmap.fill(background);
+            QPainter painter(&pixmap);
+            painter.setPen(palette().color(QPalette::Mid));
+            painter.drawRect(pixmap.rect().adjusted(0, 0, -1, -1));
+            if (auto *item = this->item(m_dragRow, 1))
+            {
+                const QRect textRect(12, 0, pixmap.width() - 24, rowHeight);
+                QColor textColor = palette().color(QPalette::Text);
+                if (qAbs(textColor.lightnessF() - background.lightnessF()) < 0.25)
+                    textColor = background.lightnessF() < 0.5 ? Qt::white : Qt::black;
+                painter.setPen(textColor);
+                QFont font = painter.font();
+                font.setBold(true);
+                painter.setFont(font);
+                painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft,
+                                 item->text());
+            }
+            painter.end();
+            drag->setPixmap(pixmap);
+            drag->setHotSpot(QPoint(12, rowHeight / 2));
+            drag->exec(supportedActions & Qt::MoveAction ? Qt::MoveAction
+                                                          : supportedActions);
+        }
+
+        void dropEvent(QDropEvent *event) override
+        {
+            const int source = m_dragRow >= 0 ? m_dragRow : currentRow();
+            int destination = indexAt(event->position().toPoint()).row();
+            if (source < 0 || source >= rowCount() || rowCount() == 0)
+            {
+                event->ignore();
+                m_dragRow = -1;
+                return;
+            }
+            if (destination < 0)
+                destination = rowCount();
+            if (destination == source || destination == source + 1)
+            {
+                event->acceptProposedAction();
+                m_dragRow = -1;
+                return;
+            }
+
+            if (destination > source)
+                --destination;
+            destination = std::clamp(destination, 0, rowCount() - 1);
+
+            // Keep the row widgets alive. Removing rows/cell widgets during a
+            // drag lets QTableWidget delete them, which used to corrupt the
+            // filter labels and could crash while the table was being rebuilt.
+            struct RowData
+            {
+                int type = 0;
+                QString name;
+                bool enabled = false;
+                int digitalOrder = 1;
+                double frequency = 0.0;
+                double q = 0.0;
+            };
+            QVector<RowData> rows;
+            rows.reserve(rowCount());
+            for (int row = 0; row < rowCount(); ++row)
+            {
+                RowData data;
+                if (auto *item = this->item(row, 1))
+                {
+                    data.type = item->data(Qt::UserRole).toInt();
+                    data.name = item->text();
+                }
+                if (data.name.isEmpty())
+                {
+                    switch (static_cast<dsp::Biquad::Type>(data.type))
+                    {
+                    case dsp::Biquad::Type::HighPass:
+                        data.name = tr("High-pass");
+                        break;
+                    case dsp::Biquad::Type::LowPass:
+                        data.name = tr("Low-pass");
+                        break;
+                    case dsp::Biquad::Type::Notch:
+                        data.name = tr("Mains notch");
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                if (auto *widget = qobject_cast<QCheckBox *>(cellWidget(row, 0)))
+                    data.enabled = widget->isChecked();
+                if (auto *widget = qobject_cast<QSpinBox *>(cellWidget(row, 2)))
+                    data.digitalOrder = widget->value();
+                if (auto *widget = qobject_cast<QDoubleSpinBox *>(cellWidget(row, 3)))
+                    data.frequency = widget->value();
+                if (auto *widget = qobject_cast<QDoubleSpinBox *>(cellWidget(row, 4)))
+                    data.q = widget->value();
+                rows.push_back(data);
+            }
+            const RowData moved = rows.takeAt(source);
+            rows.insert(destination, moved);
+
+            for (int row = 0; row < rows.size(); ++row)
+            {
+                const RowData &data = rows.at(row);
+                auto *item = this->item(row, 1);
+                if (!item)
+                {
+                    item = new QTableWidgetItem;
+                    setItem(row, 1, item);
+                }
+                item->setText(data.name);
+                item->setData(Qt::UserRole, data.type);
+                if (auto *widget = qobject_cast<QCheckBox *>(cellWidget(row, 0)))
+                {
+                    const QSignalBlocker blocker(widget);
+                    widget->setChecked(data.enabled);
+                }
+                if (auto *widget = qobject_cast<QSpinBox *>(cellWidget(row, 2)))
+                {
+                    const QSignalBlocker blocker(widget);
+                    widget->setValue(data.digitalOrder);
+                }
+                if (auto *widget = qobject_cast<QDoubleSpinBox *>(cellWidget(row, 3)))
+                {
+                    const QSignalBlocker blocker(widget);
+                    widget->setValue(data.frequency);
+                }
+                if (auto *widget = qobject_cast<QDoubleSpinBox *>(cellWidget(row, 4)))
+                {
+                    const QSignalBlocker blocker(widget);
+                    widget->setValue(data.q);
+                }
+            }
+            setCurrentCell(destination, 1);
+            event->acceptProposedAction();
+            if (orderChanged)
+                orderChanged();
+            m_dragRow = -1;
+        }
+
+    private:
+        int m_dragRow = -1;
+    };
+}
 
 MonitoringPage::MonitoringPage(AppContext *context, QWidget *parent)
     : QWidget(parent), m_context(context)
@@ -77,7 +266,7 @@ MonitoringPage::MonitoringPage(AppContext *context, QWidget *parent)
     connect(m_redrawTimer, &QTimer::timeout, this, &MonitoringPage::onRedraw);
     m_redrawTimer->start();
 
-    // FFT auto-recomputes once per second per the spec.
+    // FFT auto-recomputes once per second.
     m_fftTimer = new QTimer(this);
     m_fftTimer->setInterval(1000);
     connect(m_fftTimer, &QTimer::timeout, this, &MonitoringPage::computeFft);
@@ -85,17 +274,52 @@ MonitoringPage::MonitoringPage(AppContext *context, QWidget *parent)
 
     if (m_context)
     {
+        if (m_context->acquisition())
+        {
+            connect(m_context->acquisition(), &AcquisitionService::samplesReady,
+                    this, &MonitoringPage::onSamples);
+            // The Devices page may have started acquisition before this page
+            // was opened. Rebuild the plot immediately from the service's
+            // current geometry instead of waiting for a channel checkbox
+            // interaction or a future stream restart.
+            connect(m_context->acquisition(), &AcquisitionService::ownerChanged,
+                    this, [this](AcquisitionOwner)
+                    {
+                        if (!m_context || !m_context->acquisition()) return;
+                        const auto channels = m_context->acquisition()->activeChannels();
+                        if (!channels.isEmpty()) {
+                            rebuildChannelChecks(channels);
+                            rebuildChannels(channels);
+                        } else {
+                            rebuildChannelChecks(QVector<quint8>());
+                        } });
+        }
         connect(m_context, &AppContext::sessionChanged,
                 this, &MonitoringPage::onSessionChanged);
+        if (m_context->themeManager())
+            connect(m_context->themeManager(), &ThemeManager::themeChanged,
+                    this, [this](AppTheme) { applyThemeColors(); });
         onSessionChanged(m_context->session());
     }
 }
 
-MonitoringPage::~MonitoringPage() = default;
+MonitoringPage::~MonitoringPage()
+{
+    if (m_fftSplitter)
+    {
+        QSettings settings;
+        settings.setValue(QStringLiteral("monitoring/fftSplitterState"),
+                          m_fftSplitter->saveState());
+    }
+}
 
 void MonitoringPage::buildUi()
 {
-    auto *root = new QVBoxLayout(this);
+    Ui::MonitoringPageForm form;
+    form.setupUi(this);
+    auto *root = qobject_cast<QVBoxLayout *>(layout());
+    if (!root)
+        root = new QVBoxLayout(this);
 
     // --- Top control bar (full page width) ---
     auto *controlBar = new QGroupBox(this);
@@ -120,6 +344,7 @@ void MonitoringPage::buildUi()
     m_unitCombo = new QComboBox(this);
     m_unitCombo->addItem(QStringLiteral("µV"), 1.0);
     m_unitCombo->addItem(QStringLiteral("mV"), 1.0e-3);
+    m_unitCombo->addItem(QStringLiteral("V"), 1.0e-6);
     controls->addWidget(m_unitCombo);
 
     controls->addStretch();
@@ -133,7 +358,6 @@ void MonitoringPage::buildUi()
     m_recordButton->setEnabled(false);
     m_recordButton->setToolTip(tr("Connect a device to enable recording"));
     controls->addWidget(m_recordButton);
-
 
     root->addWidget(controlBar);
 
@@ -223,8 +447,8 @@ QWidget *MonitoringPage::buildGraphTab()
     m_plot->setSelectionRectMode(QCP::srmZoom);
     m_plot->setMinimumHeight(300);
 
-    // Channel visibility/stream selection. The number of checkboxes is
-    // refreshed from the connected device's GetDeviceInfo response.
+    // Channel visibility only. Checkboxes are created from the immutable
+    // active stream geometry selected on the Devices page.
     auto *channelBox = new QGroupBox(tr("Channels"), tab);
     auto *channelLayout = new QHBoxLayout(channelBox);
     channelLayout->setContentsMargins(6, 2, 6, 2);
@@ -249,7 +473,7 @@ QWidget *MonitoringPage::buildGraphTab()
     return tab;
 }
 
-void MonitoringPage::rebuildChannelChecks(int channelCount)
+void MonitoringPage::rebuildChannelChecks(const QVector<quint8> &channels)
 {
     if (!m_channelSelector)
         return;
@@ -264,17 +488,17 @@ void MonitoringPage::rebuildChannelChecks(int channelCount)
         auto *item = layout->takeAt(0);
         delete item;
     }
-    if (channelCount <= 0)
+    if (channels.isEmpty())
     {
         m_channelSelector->setVisible(false);
         m_updatingChannelChecks = false;
         return;
     }
     m_channelSelector->setVisible(true);
-    const int count = std::clamp(channelCount, 1, EcgAdcProtocol::kMaxChannels);
-    for (int i = 0; i < count; ++i)
+    for (quint8 channel : channels)
     {
-        auto *cb = new QCheckBox(QStringLiteral("CH%1").arg(i), m_channelSelector);
+        auto *cb = new QCheckBox(QStringLiteral("CH%1").arg(channel), m_channelSelector);
+        cb->setProperty("physicalChannel", channel);
         cb->setChecked(true);
         connect(cb, &QCheckBox::toggled, this, &MonitoringPage::onChannelToggled);
         m_channelChecks.push_back(cb);
@@ -284,30 +508,33 @@ void MonitoringPage::rebuildChannelChecks(int channelCount)
     m_updatingChannelChecks = false;
 }
 
-
 QWidget *MonitoringPage::buildFilterTab()
 {
     auto *tab = new QWidget(m_tabs);
     auto *layout = new QVBoxLayout(tab);
 
-    m_filterEnableCheck = new QCheckBox(tr("Enable display filters"), tab);
-    layout->addWidget(m_filterEnableCheck);
-
-    auto *info = new QLabel(
-        tr("Each stage can be toggled independently. The Order column sets the "
-           "mathematical application sequence (lowest first)."),
-        tab);
-    info->setWordWrap(true);
-    info->setEnabled(false);
-    layout->addWidget(info);
-
-    auto *box = new QGroupBox(tr("Filter stages"), tab);
-    auto *grid = new QGridLayout(box);
-    grid->addWidget(new QLabel(tr("Enable"), box), 0, 0);
-    grid->addWidget(new QLabel(tr("Stage"), box), 0, 1);
-    grid->addWidget(new QLabel(tr("Order"), box), 0, 2);
-    grid->addWidget(new QLabel(tr("Frequency (Hz)"), box), 0, 3);
-    grid->addWidget(new QLabel(tr("Q"), box), 0, 4);
+    auto *filterTable = new FilterTableWidget(tab);
+    m_filterTable = filterTable;
+    m_filterTable->setColumnCount(5);
+    m_filterTable->setHorizontalHeaderLabels({tr("Enabled"), tr("Filter"),
+                                               tr("Digital order"), tr("Frequency (Hz)"), tr("Q")});
+    m_filterTable->horizontalHeaderItem(2)->setToolTip(
+        tr("Number of cascaded biquad sections; the effective filter order is twice this value."));
+    m_filterTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_filterTable->setColumnWidth(0, 58);
+    m_filterTable->setColumnWidth(1, 150);
+    m_filterTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_filterTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_filterTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_filterTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_filterTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_filterTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_filterTable->setDragDropMode(QAbstractItemView::InternalMove);
+    m_filterTable->setDefaultDropAction(Qt::MoveAction);
+    m_filterTable->setDragEnabled(true);
+    m_filterTable->setAcceptDrops(true);
+    m_filterTable->setDropIndicatorShown(true);
+    layout->addWidget(m_filterTable, 1);
 
     struct Preset
     {
@@ -322,33 +549,36 @@ QWidget *MonitoringPage::buildFilterTab()
         {dsp::Biquad::Type::Notch, "Mains notch", 50.0, 30.0},
     };
 
-    int row = 1;
+    int row = 0;
     for (const auto &p : presets)
     {
         FilterStage stage;
         stage.type = p.type;
-        stage.enable = new QCheckBox(box);
-        auto *nameLabel = new QLabel(tr(p.name), box);
-        stage.order = new QSpinBox(box);
-        stage.order->setRange(1, 9);
-        stage.order->setValue(row);
-        stage.freq = new QDoubleSpinBox(box);
+        m_filterTable->insertRow(row);
+        stage.enable = new QCheckBox(m_filterTable);
+        stage.enable->setChecked(false);
+        auto *nameLabel = new QTableWidgetItem(tr(p.name));
+        nameLabel->setData(Qt::UserRole, static_cast<int>(p.type));
+        nameLabel->setFlags(nameLabel->flags() & ~Qt::ItemIsEditable);
+        stage.digitalOrder = new QSpinBox(m_filterTable);
+        stage.digitalOrder->setRange(1, 8);
+        stage.digitalOrder->setValue(1);
+        stage.freq = new QDoubleSpinBox(m_filterTable);
         stage.freq->setRange(0.1, 2000.0);
         stage.freq->setValue(p.freq);
-        stage.q = new QDoubleSpinBox(box);
+        stage.q = new QDoubleSpinBox(m_filterTable);
         stage.q->setRange(0.1, 100.0);
         stage.q->setValue(p.q);
 
-        grid->addWidget(stage.enable, row, 0);
-        grid->addWidget(nameLabel, row, 1);
-        grid->addWidget(stage.order, row, 2);
-        grid->addWidget(stage.freq, row, 3);
-        grid->addWidget(stage.q, row, 4);
+        m_filterTable->setCellWidget(row, 0, stage.enable);
+        m_filterTable->setItem(row, 1, nameLabel);
+        m_filterTable->setCellWidget(row, 2, stage.digitalOrder);
+        m_filterTable->setCellWidget(row, 3, stage.freq);
+        m_filterTable->setCellWidget(row, 4, stage.q);
 
         m_filterStages.push_back(stage);
         ++row;
     }
-    layout->addWidget(box);
 
     auto *btnRow = new QHBoxLayout();
     auto *applyBtn = new QPushButton(tr("Apply"), tab);
@@ -361,6 +591,7 @@ QWidget *MonitoringPage::buildFilterTab()
 
     connect(applyBtn, &QPushButton::clicked, this, &MonitoringPage::applyFilters);
     connect(clearBtn, &QPushButton::clicked, this, &MonitoringPage::clearFilters);
+    filterTable->orderChanged = [this] { updateFilterChains(); };
 
     return tab;
 }
@@ -381,18 +612,12 @@ QWidget *MonitoringPage::buildFftTab()
     form->addRow(tr("Window:"), m_fftWindowCombo);
     layout->addLayout(form);
 
-    auto *note = new QLabel(tr("Spectrum updates automatically every second."), tab);
-    note->setEnabled(false);
-    layout->addWidget(note);
-
     m_fftPlot = new QCustomPlot(tab);
     m_fftPlot->addGraph();
     m_fftPlot->xAxis->setLabel(tr("Frequency (Hz)"));
     m_fftPlot->yAxis->setLabel(tr("Magnitude (µV)"));
     m_fftPlot->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom);
     m_fftPlot->setSelectionRectMode(QCP::srmZoom);
-    layout->addWidget(m_fftPlot, 1);
-
     // Same interaction model as the channel plot: wheel/drag zoom pins the
     // view, middle-click restores auto-fit.
     connect(m_fftPlot, &QCustomPlot::mousePress, this, &MonitoringPage::onFftMousePress);
@@ -401,8 +626,17 @@ QWidget *MonitoringPage::buildFftTab()
     m_harmonicsTable = new QTableWidget(0, 2, tab);
     m_harmonicsTable->setHorizontalHeaderLabels({tr("Frequency (Hz)"), tr("Magnitude (µV)")});
     m_harmonicsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_harmonicsTable->setMaximumHeight(180);
-    layout->addWidget(m_harmonicsTable);
+    m_harmonicsTable->setMinimumHeight(80);
+    m_fftSplitter = new QSplitter(Qt::Vertical, tab);
+    m_fftSplitter->addWidget(m_fftPlot);
+    m_fftSplitter->addWidget(m_harmonicsTable);
+    m_fftSplitter->setStretchFactor(0, 3);
+    m_fftSplitter->setStretchFactor(1, 1);
+    layout->addWidget(m_fftSplitter, 1);
+    QSettings settings;
+    const QByteArray state = settings.value(QStringLiteral("monitoring/fftSplitterState")).toByteArray();
+    if (!state.isEmpty())
+        m_fftSplitter->restoreState(state);
 
     return tab;
 }
@@ -425,8 +659,6 @@ void MonitoringPage::onPlotWheel(QWheelEvent *)
     // which updates m_viewSpanSec so every stacked channel adopts the same
     // zoom on the next redraw. Amplitude stays auto-fit.
 }
-
-
 
 void MonitoringPage::onFftMousePress(QMouseEvent *event)
 {
@@ -467,7 +699,6 @@ void MonitoringPage::resetPlotScale()
     m_plot->replot();
 }
 
-
 void MonitoringPage::onSessionChanged(QtDeviceSessionAdapter *session)
 {
     if (m_session)
@@ -484,17 +715,17 @@ void MonitoringPage::onSessionChanged(QtDeviceSessionAdapter *session)
         // the button disabled until a live session arrives.
         m_recordButton->setEnabled(false);
         m_recordButton->setToolTip(tr("Connect a device to enable recording"));
-        rebuildChannelChecks(0);
+        rebuildChannelChecks(QVector<quint8>());
         return;
     }
 
-    connect(m_session, &QtDeviceSessionAdapter::samplesReady,
-            this, &MonitoringPage::onSamples);
     connect(m_session, &QtDeviceSessionAdapter::deviceInfoChanged,
             this, &MonitoringPage::onDeviceInfoChanged);
     // Noise is meaningful only while a controller MUX test input is active
     // (short-to-ground or internal test signal), never for normal electrodes.
     connect(m_session, &QtDeviceSessionAdapter::testModeChanged,
+            this, &MonitoringPage::onMuxTestChanged);
+    connect(m_session, &QtDeviceSessionAdapter::muxTestChanged,
             this, &MonitoringPage::onMuxTestChanged);
     connect(m_session, &QtDeviceSessionAdapter::playbackPositionChanged,
             this, &MonitoringPage::onPlaybackPosition);
@@ -513,22 +744,45 @@ void MonitoringPage::onSessionChanged(QtDeviceSessionAdapter *session)
     m_recordButton->setToolTip(canRecord
                                    ? tr("Record the live device stream to a .bsig file")
                                    : tr("Recording is unavailable during playback"));
-    rebuildChannelChecks(m_session->channelCount());
+    const QVector<quint8> active = (m_context && m_context->acquisition())
+                                       ? m_context->acquisition()->activeChannels()
+                                       : QVector<quint8>();
+    QVector<quint8> channels = active;
+    if (channels.isEmpty() && m_isPlayback)
+        channels = m_session->playbackChannels();
+    rebuildChannelChecks(channels);
+    if (!channels.isEmpty())
+        rebuildChannels(channels);
     onMuxTestChanged(m_session->testModeEnabled());
 }
 
 void MonitoringPage::onDeviceInfoChanged(int channelCount)
 {
-    rebuildChannelChecks(channelCount);
+    Q_UNUSED(channelCount);
+    if (m_context && m_context->acquisition())
+    {
+        const auto active = m_context->acquisition()->activeChannels();
+        if (!active.isEmpty())
+        {
+            rebuildChannelChecks(active);
+            rebuildChannels(active);
+        }
+        else
+        {
+            rebuildChannelChecks(QVector<quint8>());
+        }
+    }
 }
 
 void MonitoringPage::onMuxTestChanged(bool enabled)
 {
+    Q_UNUSED(enabled);
+    const bool showNoise = m_session && (m_session->testModeEnabled() || m_session->muxTestEnabled());
     for (ChannelView &cv : m_channels)
     {
         if (!cv.noiseLabel)
             continue;
-        cv.noiseLabel->setText(enabled
+        cv.noiseLabel->setText(showNoise
                                    ? tr("Noise RMS: %1 %2").arg(cv.noiseRms * m_unitScale, 0, 'f', 1).arg(m_unitSuffix)
                                    : QString());
     }
@@ -538,33 +792,26 @@ void MonitoringPage::onMuxTestChanged(bool enabled)
 
 void MonitoringPage::onChannelToggled(bool checked)
 {
+    Q_UNUSED(checked);
     if (m_updatingChannelChecks || !m_session)
         return;
-    // Keep at least one channel selected; the protocol rejects an empty set.
-    if (!checked)
+    // Channel checkboxes control visibility only. Physical acquisition
+    // channels are selected on the Devices page and owned by AcquisitionService.
+    for (ChannelView &cv : m_channels)
     {
-        bool any = false;
+        cv.enabled = true;
         for (auto *cb : m_channelChecks)
-            any |= cb->isChecked();
-        if (!any)
         {
-            if (auto *cb = qobject_cast<QCheckBox *>(sender()))
+            if (cb->property("physicalChannel").toInt() == cv.physIndex)
             {
-                m_updatingChannelChecks = true;
-                cb->setChecked(true);
-                m_updatingChannelChecks = false;
+                cv.enabled = cb->isChecked();
+                break;
             }
-            return;
         }
     }
-    QVector<quint8> selected;
-    for (int i = 0; i < m_channelChecks.size(); ++i)
-        if (m_channelChecks[i]->isChecked())
-            selected.push_back(static_cast<quint8>(i));
-    if (!selected.isEmpty())
-        m_session->startStream(selected);
+    if (m_plot)
+        m_plot->replot(QCustomPlot::rpQueuedReplot);
 }
-
 
 int MonitoringPage::currentSampleRate() const
 {
@@ -636,7 +883,10 @@ void MonitoringPage::rebuildChannels(const QVector<quint8> &channels)
 
         auto *current = m_plot->addGraph(rect->axis(QCPAxis::atBottom),
                                          rect->axis(QCPAxis::atLeft));
-        const QColor color = channelColor(channels[i]);
+        const QColor color = channelColor(channels[i],
+                                          m_context && m_context->themeManager()
+                                              ? m_context->themeManager()->isDark()
+                                              : true);
         current->setPen(QPen(color));
 
         auto *divider = new QCPItemLine(m_plot);
@@ -671,38 +921,19 @@ void MonitoringPage::rebuildChannels(const QVector<quint8> &channels)
     m_followLatest = true;
     m_viewSpanSec = m_timeWindowSec;
     updateFilterChains();
+    applyThemeColors();
     m_plot->replot();
 }
 
-
 void MonitoringPage::onSamples(const QtDeviceSessionAdapter::SampleBlock &block)
 {
-    // (Re)build channel views if the active set changed.
-    bool channelSetChanged = false;
-    if (m_channels.size() != block.channels.size())
+    // The active channel set is immutable for the lifetime of a stream. Build
+    // the plot once if streaming began before this page was opened, then keep
+    // processing incoming blocks in that fixed order.
+    if (m_channels.isEmpty() && !block.channels.isEmpty())
     {
+        rebuildChannelChecks(block.channels);
         rebuildChannels(block.channels);
-        channelSetChanged = true;
-    }
-    else
-    {
-        for (int i = 0; i < block.channels.size(); ++i)
-        {
-            if (m_channels[i].physIndex != block.channels[i])
-            {
-                rebuildChannels(block.channels);
-                channelSetChanged = true;
-                break;
-            }
-        }
-    }
-
-    if (channelSetChanged && !m_channelChecks.isEmpty())
-    {
-        m_updatingChannelChecks = true;
-        for (int i = 0; i < m_channelChecks.size(); ++i)
-            m_channelChecks[i]->setChecked(block.channels.contains(static_cast<quint8>(i)));
-        m_updatingChannelChecks = false;
     }
 
     const int fs = currentSampleRate() > 0 ? currentSampleRate() : 250;
@@ -735,7 +966,7 @@ void MonitoringPage::onSamples(const QtDeviceSessionAdapter::SampleBlock &block)
         for (int i = 0; i < block.samples.size() && i < m_channels.size(); ++i)
         {
             ChannelView &cv = m_channels[i];
-            if (!cv.enabled || sample >= block.samples[i].size())
+            if (sample >= block.samples[i].size())
                 continue;
             const double value = static_cast<double>(block.samples[i][sample]);
             cv.currentRaw.push_back(value);
@@ -762,12 +993,11 @@ void MonitoringPage::onSamples(const QtDeviceSessionAdapter::SampleBlock &block)
         }
         cv.noiseRms = std::sqrt(sq / n);
         if (cv.noiseLabel && m_session)
-            cv.noiseLabel->setText(m_session->testModeEnabled()
+            cv.noiseLabel->setText((m_session->testModeEnabled() || m_session->muxTestEnabled())
                                        ? tr("Noise RMS: %1 %2").arg(cv.noiseRms * m_unitScale, 0, 'f', 1).arg(m_unitSuffix)
                                        : QString());
     }
 }
-
 
 void MonitoringPage::redrawChannel(ChannelView &cv)
 {
@@ -819,10 +1049,7 @@ void MonitoringPage::redrawChannel(ChannelView &cv)
         cv.cycleDivider->end->setCoords(std::min(x, m_timeWindowSec), yr.upper);
         cv.cycleDivider->setVisible(m_hasPreviousCycle);
     }
-
 }
-
-
 
 void MonitoringPage::onRedraw()
 {
@@ -841,7 +1068,6 @@ void MonitoringPage::onTimeWindowChanged(double seconds)
         m_viewSpanSec = m_timeWindowSec;
 }
 
-
 void MonitoringPage::onDecimationChanged(int pointsPerSec)
 {
     m_pointsPerSec = pointsPerSec;
@@ -854,7 +1080,8 @@ void MonitoringPage::applyUnitLabels()
         if (cv.axisRect)
             cv.axisRect->axis(QCPAxis::atLeft)
                 ->setLabel(QStringLiteral("CH%1 (%2)").arg(cv.physIndex).arg(m_unitSuffix));
-        if (cv.noiseLabel && m_session && m_session->testModeEnabled())
+        if (cv.noiseLabel && m_session &&
+            (m_session->testModeEnabled() || m_session->muxTestEnabled()))
             cv.noiseLabel->setText(tr("Noise RMS: %1 %2").arg(cv.noiseRms * m_unitScale, 0, 'f', 1).arg(m_unitSuffix));
     }
     if (m_fftPlot)
@@ -927,28 +1154,25 @@ void MonitoringPage::onXRangeChanged()
     m_syncing = false;
 }
 
-
 void MonitoringPage::updateFilterChains()
 {
     const double fs = currentSampleRate();
 
-    // Collect enabled stages and sort by the user-specified order.
-    QVector<const FilterStage *> ordered;
-    for (const FilterStage &s : m_filterStages)
-        if (s.enable && s.enable->isChecked())
-            ordered.push_back(&s);
-    std::sort(ordered.begin(), ordered.end(),
-              [](const FilterStage *a, const FilterStage *b)
-              { return a->order->value() < b->order->value(); });
-
     for (ChannelView &cv : m_channels)
     {
         cv.filter.clear();
-        for (const FilterStage *s : ordered)
+        // Table rows are the application order: the top row is applied first.
+        for (int row = 0; m_filterTable && row < m_filterTable->rowCount(); ++row)
         {
-            dsp::Biquad bq;
-            bq.configure(s->type, fs, s->freq->value(), s->q->value());
-            cv.filter.add(bq);
+            auto *enable = qobject_cast<QCheckBox *>(m_filterTable->cellWidget(row, 0));
+            auto *digitalOrder = qobject_cast<QSpinBox *>(m_filterTable->cellWidget(row, 2));
+            auto *freq = qobject_cast<QDoubleSpinBox *>(m_filterTable->cellWidget(row, 3));
+            auto *q = qobject_cast<QDoubleSpinBox *>(m_filterTable->cellWidget(row, 4));
+            auto *item = m_filterTable->item(row, 1);
+            if (!enable || !enable->isChecked() || !digitalOrder || !freq || !q || !item)
+                continue;
+            const auto type = static_cast<dsp::Biquad::Type>(item->data(Qt::UserRole).toInt());
+            cv.filter.add(type, fs, freq->value(), q->value(), digitalOrder->value());
         }
         cv.filter.reset();
     }
@@ -979,16 +1203,11 @@ void MonitoringPage::reprocessFilters()
 
 void MonitoringPage::applyFilters()
 {
-    // Any enabled stage implies the user wants filtering; auto-tick the master
-    // toggle so pressing Apply visibly does something even if they forgot it.
     bool anyStage = false;
     for (const FilterStage &s : m_filterStages)
         if (s.enable && s.enable->isChecked())
             anyStage = true;
-    if (anyStage && !m_filterEnableCheck->isChecked())
-        m_filterEnableCheck->setChecked(true);
-
-    m_filterEnabled = m_filterEnableCheck->isChecked();
+    m_filterEnabled = anyStage;
     updateFilterChains();
     reprocessFilters();
 }
@@ -996,7 +1215,6 @@ void MonitoringPage::applyFilters()
 void MonitoringPage::clearFilters()
 {
     m_filterEnabled = false;
-    m_filterEnableCheck->setChecked(false);
     for (FilterStage &s : m_filterStages)
         if (s.enable)
             s.enable->setChecked(false);
@@ -1009,7 +1227,6 @@ void MonitoringPage::clearFilters()
     if (m_plot)
         m_plot->replot(QCustomPlot::rpQueuedReplot);
 }
-
 
 void MonitoringPage::computeFft()
 {
@@ -1034,12 +1251,14 @@ void MonitoringPage::computeFft()
     for (double m : result.magnitude)
         mags.push_back(m * m_unitScale);
     m_fftPlot->graph(0)->setData(freqs, mags, true);
-    m_fftPlot->graph(0)->setPen(QPen(channelColor(cv.physIndex)));
+    m_fftPlot->graph(0)->setPen(QPen(channelColor(cv.physIndex,
+                                                   m_context && m_context->themeManager()
+                                                       ? m_context->themeManager()->isDark()
+                                                       : true)));
     // Only auto-fit while the user has not zoomed; otherwise hold their view.
     if (m_fftAutoScale)
         m_fftPlot->rescaleAxes();
     m_fftPlot->replot();
-
 
     m_harmonicsTable->setRowCount(static_cast<int>(result.peaks.size()));
     for (int i = 0; i < static_cast<int>(result.peaks.size()); ++i)
@@ -1049,6 +1268,61 @@ void MonitoringPage::computeFft()
         m_harmonicsTable->setItem(i, 1,
                                   new QTableWidgetItem(QString::number(result.peaks[i].magnitude * m_unitScale, 'f', 4)));
     }
+}
+
+void MonitoringPage::applyThemeColors()
+{
+    const bool dark = !m_context || !m_context->themeManager() || m_context->themeManager()->isDark();
+    const QColor background = dark ? QColor(24, 26, 31) : QColor(255, 255, 255);
+    const QColor foreground = dark ? QColor(210, 214, 222) : QColor(45, 48, 55);
+    const QColor grid = dark ? QColor(65, 70, 80) : QColor(205, 210, 218);
+    auto styleAxis = [&](QCPAxis *axis)
+    {
+        if (!axis) return;
+        axis->setBasePen(QPen(foreground));
+        axis->setTickPen(QPen(foreground));
+        axis->setSubTickPen(QPen(foreground));
+        axis->setTickLabelColor(foreground);
+        axis->setLabelColor(foreground);
+        axis->grid()->setPen(QPen(grid));
+        axis->grid()->setSubGridPen(QPen(grid));
+    };
+    if (m_plot)
+    {
+        m_plot->setBackground(background);
+        for (const ChannelView &cv : m_channels)
+        {
+            if (cv.axisRect)
+            {
+                cv.axisRect->setBackground(background);
+                styleAxis(cv.axisRect->axis(QCPAxis::atLeft));
+                styleAxis(cv.axisRect->axis(QCPAxis::atBottom));
+            }
+        }
+    }
+    if (m_fftPlot)
+    {
+        m_fftPlot->setBackground(background);
+        styleAxis(m_fftPlot->xAxis);
+        styleAxis(m_fftPlot->yAxis);
+    }
+    for (const ChannelView &cv : m_channels)
+    {
+        if (cv.currentGraph)
+            cv.currentGraph->setPen(QPen(channelColor(cv.physIndex, dark)));
+        if (cv.noiseLabel)
+            cv.noiseLabel->setTextColor(dark ? QColor(160, 165, 175) : QColor(100, 105, 115));
+    }
+    if (m_fftPlot && m_fftPlot->graphCount() > 0)
+    {
+        const int idx = m_fftChannelCombo ? m_fftChannelCombo->currentData().toInt() : -1;
+        if (idx >= 0 && idx < m_channels.size())
+            m_fftPlot->graph(0)->setPen(QPen(channelColor(m_channels[idx].physIndex, dark)));
+    }
+    if (m_plot)
+        m_plot->replot(QCustomPlot::rpQueuedReplot);
+    if (m_fftPlot)
+        m_fftPlot->replot(QCustomPlot::rpQueuedReplot);
 }
 
 void MonitoringPage::onOpenRecording()
@@ -1061,7 +1335,7 @@ void MonitoringPage::onOpenRecording()
     if (path.isEmpty())
         return;
 
-    auto *session = new QtDeviceSessionAdapter();
+    auto *session = new QtDeviceSessionAdapter(m_context ? m_context->dataHub() : nullptr);
     if (!session->setupPlayback(path))
     {
         delete session;
@@ -1072,13 +1346,12 @@ void MonitoringPage::onOpenRecording()
     session->connectDevice();
     // Stream the recording's channels so the graphs populate, then start
     // playback. The transport strip lets the user pause/seek from here.
-    if (!channels.isEmpty())
-        session->startStream(channels);
+    if (!channels.isEmpty() && m_context->acquisition())
+        m_context->acquisition()->request({AcquisitionOwner::Playback, channels});
     session->play();
     if (m_playButton)
         m_playButton->setText(tr("Pause"));
 }
-
 
 void MonitoringPage::toggleRecording()
 {
@@ -1120,17 +1393,19 @@ void MonitoringPage::toggleRecording()
         return;
     }
 
-    // Record every currently active channel; all enabled here (a disabled
-    // display channel could be filled with a placeholder before recording).
-    QVector<quint8> channels;
-    QVector<bool> enabled;
+    // Recording always stores the raw stream for every physically acquired
+    // channel. Display checkboxes and filters affect rendering only.
+    QVector<quint8> channels = (m_context && m_context->acquisition())
+                                   ? m_context->acquisition()->activeChannels()
+                                   : QVector<quint8>();
+    if (channels.isEmpty())
+        for (const ChannelView &cv : m_channels)
+            channels.push_back(cv.physIndex);
+    QVector<bool> enabled(channels.size(), true);
     QVector<QString> labels;
-    for (const ChannelView &cv : m_channels)
-    {
-        channels.push_back(cv.physIndex);
-        enabled.push_back(cv.enabled);
-        labels.push_back(QStringLiteral("CH%1").arg(cv.physIndex));
-    }
+    labels.reserve(channels.size());
+    for (quint8 channel : channels)
+        labels.push_back(QStringLiteral("CH%1").arg(channel));
 
     m_session->startRecording(path, description, channels, enabled, labels);
 
@@ -1199,7 +1474,6 @@ void MonitoringPage::resetTimeBaseTo(quint64 sampleIndex)
     if (m_plot)
         m_plot->replot(QCustomPlot::rpQueuedReplot);
 }
-
 
 void MonitoringPage::onSpeedChanged(int index)
 {

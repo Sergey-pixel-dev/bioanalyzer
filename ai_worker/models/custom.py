@@ -3,10 +3,44 @@
 import json, math, os, struct
 
 
+def meta():
+    return {
+        "name": "Custom centroid classifier",
+        "task_type": "classification",
+        "target_type": "label",
+        "output": {"kind": "top_k", "max_k": 5},
+        "hyperparameters": [
+            {"name": "epochs", "type": "int", "min": 1, "max": 10000, "default": 20},
+            {"name": "batch_size", "type": "int", "min": 1, "max": 4096, "default": 32},
+            {
+                "name": "learning_rate",
+                "type": "float",
+                "min": 1e-7,
+                "max": 1.0,
+                "default": 1e-3,
+            },
+            {
+                "name": "validation_split",
+                "type": "float",
+                "min": 0.0,
+                "max": 0.9,
+                "default": 0.2,
+            },
+            {
+                "name": "device",
+                "type": "enum",
+                "choices": ["cpu", "cuda"],
+                "default": "cpu",
+            },
+        ],
+    }
+
+
 def _examples(dataset):
     with open(os.path.join(dataset, "manifest.json"), encoding="utf-8") as f:
         manifest = json.load(f)
-    channels = len(manifest.get("channels", []))
+    capture = manifest.get("capture", {})
+    channels = len(capture.get("channels", manifest.get("channels", [])))
     labels = []
     rows = []
     with open(os.path.join(dataset, "examples.jsonl"), encoding="utf-8") as f:
@@ -14,7 +48,12 @@ def _examples(dataset):
             if not line.strip():
                 continue
             item = json.loads(line)
-            label = item.get("label", "unknown")
+            target = item.get("target", {})
+            label = (
+                target.get("label", "unknown")
+                if isinstance(target, dict)
+                else "unknown"
+            )
             if label not in labels:
                 labels.append(label)
             rows.append((label, item["file"], int(item.get("samples", 0))))
@@ -87,8 +126,14 @@ def predict(model, values, rows, channels):
     scale = max(score for _, score in scores)
     weights = [(label, math.exp(score - scale)) for label, score in scores]
     total = sum(w for _, w in weights) or 1.0
-    return sorted(
-        ({"label": label, "probability": weight / total} for label, weight in weights),
-        key=lambda item: item["probability"],
-        reverse=True,
-    )[:5]
+    return {
+        "kind": "top_k",
+        "items": sorted(
+            (
+                {"label": label, "probability": weight / total}
+                for label, weight in weights
+            ),
+            key=lambda item: item["probability"],
+            reverse=True,
+        )[:5],
+    }

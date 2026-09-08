@@ -3,7 +3,7 @@
 
 #include <QWidget>
 #include <QVector>
-#include "core/ecgadcprotocol.h"
+#include "core/applicationprotocol.h"
 
 class AppContext;
 class QtDeviceSessionAdapter;
@@ -83,7 +83,7 @@ private:
     int m_applySampleRate = 0;
     quint64 m_applyGeneration = 0;
     QString m_applyError;
-    int m_channelCount = EcgAdcProtocol::kMaxChannels;
+    int m_channelCount = ApplicationProtocol::kMaxChannels;
 };
 
 #endif // DEVICEPAGE_H

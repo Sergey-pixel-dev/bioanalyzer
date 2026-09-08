@@ -30,6 +30,7 @@ int TransportProtocol::sendCommand(const uint8_t *payload, int len, ResponseHand
 
     const uint8_t seq = m_curSeq;
 
+    /* TODO: наверное можно обойтись без crc_Region и считать сразу по vector frame*/
     // CRC covers the unescaped [type][seq][len_L][len_H][payload].
     std::vector<uint8_t> crcRegion;
     crcRegion.reserve(4 + len);
@@ -64,14 +65,7 @@ int TransportProtocol::sendCommand(const uint8_t *payload, int len, ResponseHand
     pushEscaped(static_cast<uint8_t>(crc & 0xFF));
     pushEscaped(static_cast<uint8_t>((crc >> 8) & 0xFF));
 
-    // Install the response handler before handing bytes to the transport.
-    // A loopback/very low-latency device may produce a response immediately
-    // from write(); registering afterwards would let poll() dispatch that
-    // response with no matching handler and the application would time out.
     m_pending[seq] = std::move(onResult);
-    // Advance before write() as well.  A loopback transport may invoke the
-    // response path re-entrantly from write(); a callback that sends the next
-    // command must receive a fresh sequence number instead of reusing `seq`.
     m_curSeq = static_cast<uint8_t>(m_curSeq + 1);
 
     const int written = m_transport->write(frame.data(), static_cast<int>(frame.size()));
@@ -191,7 +185,6 @@ void TransportProtocol::handleByte(uint8_t byte)
         if (!m_escape && m_rxPayload.size() == m_rxLen)
             m_state = RxState::CrcLow;
         break;
-
     case RxState::CrcLow:
         if (m_escape)
         {

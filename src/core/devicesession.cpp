@@ -6,6 +6,8 @@
 #include <chrono>
 #include <dirent.h>
 #include <thread>
+#include <stdexcept>
+#include <cstddef>
 
 std::vector<DeviceSession::PortInfo> DeviceSession::discoverPorts()
 {
@@ -37,18 +39,18 @@ std::vector<DeviceSession::PortInfo> DeviceSession::discoverPorts()
     return ports;
 }
 
-DeviceSession::ProbeResult DeviceSessionfprobePortDetailed(const std::string &portPath,
-                                                           int baud, int timeoutMs,
-                                                           int maxAttempts)
+DeviceSession::ProbeResult DeviceSession::probePortDetailed(const std::string &portPath,
+                                                            int baud, int timeoutMs,
+                                                            int maxAttempts)
 {
-    ProbeResult result;
+    DeviceSession::ProbeResult result;
     maxAttempts = std::max(1, maxAttempts);
     timeoutMs = std::max(1, timeoutMs);
 
     Device dev(portPath, baud);
     if (dev.open() < 0)
     {
-        result.status = ProbeStatus::OpenFailed;
+        result.status = DeviceSession::ProbeStatus::OpenFailed;
         return result;
     }
 
@@ -71,7 +73,7 @@ DeviceSession::ProbeResult DeviceSessionfprobePortDetailed(const std::string &po
                                            if (error == TransportProtocol::ParseError::CrcMismatch)
                                                crcError = true; });
 
-        const uint8_t command = static_cast<uint8_t>(EcgAdcProtocol::Cmd::GetDeviceInfo);
+        const uint8_t command = static_cast<uint8_t>(ApplicationProtocol::Cmd::GetDeviceInfo);
         const int sendResult = transport.sendCommand(&command, 1,
                                                      [&](bool ok, const uint8_t *payload, int len)
                                                      {
@@ -83,10 +85,10 @@ DeviceSession::ProbeResult DeviceSessionfprobePortDetailed(const std::string &po
                                                                  errorCode = payload[0];
                                                              return;
                                                          }
-                                                         EcgAdcProtocol::DeviceInfo info;
-                                                         if (EcgAdcProtocol::decodeDeviceInfo(payload, len, info) &&
+                                                         ApplicationProtocol::DeviceInfo info;
+                                                         if (ApplicationProtocol::decodeDeviceInfo(payload, len, info) &&
                                                              info.channelCount > 0 &&
-                                                             info.channelCount <= EcgAdcProtocol::kMaxChannels)
+                                                             info.channelCount <= ApplicationProtocol::kMaxChannels)
                                                          {
                                                              result.info = std::move(info);
                                                              valid = true;
@@ -95,7 +97,7 @@ DeviceSession::ProbeResult DeviceSessionfprobePortDetailed(const std::string &po
         if (sendResult < 0)
         {
             transportFailure = true;
-            result.status = ProbeStatus::TransportError;
+            result.status = DeviceSession::ProbeStatus::TransportError;
             break;
         }
 
@@ -114,7 +116,7 @@ DeviceSession::ProbeResult DeviceSessionfprobePortDetailed(const std::string &po
 
         if (valid)
         {
-            result.status = ProbeStatus::Success;
+            result.status = DeviceSession::ProbeStatus::Success;
             result.errorCode = 0;
             dev.close();
             return result;
@@ -122,29 +124,19 @@ DeviceSession::ProbeResult DeviceSessionfprobePortDetailed(const std::string &po
 
         if (protocolError)
         {
-            result.status = ProbeStatus::ProtocolError;
+            result.status = DeviceSession::ProbeStatus::ProtocolError;
             result.errorCode = errorCode;
             dev.close();
             return result;
         }
 
-        result.status = transportFailure || crcError ? ProbeStatus::TransportError
-                                                     : (completed ? ProbeStatus::InvalidResponse
-                                                                  : ProbeStatus::Timeout);
+        result.status = transportFailure || crcError ? DeviceSession::ProbeStatus::TransportError
+                                                     : (completed ? DeviceSession::ProbeStatus::InvalidResponse
+                                                                  : DeviceSession::ProbeStatus::Timeout);
     }
 
     dev.close();
     return result;
-}
-
-bool DeviceSession::probePort(const std::string &portPath, int baud, int timeoutMs,
-                              EcgAdcProtocol::DeviceInfo &out)
-{
-    const ProbeResult result = probePortDetailed(portPath, baud, timeoutMs, 1);
-    if (!result.ok())
-        return false;
-    out = result.info;
-    return true;
 }
 
 std::vector<DeviceSession::DiscoveredDevice>
@@ -166,19 +158,23 @@ DeviceSession::scanDevices(int baud, int timeoutMs, int maxAttempts)
     return found;
 }
 
-DeviceSession::DeviceSession(ITransport *transport, bool ownTransport)
+DeviceSession::DeviceSession(ITransport *transport, DataHub *dataHub, bool ownTransport)
     : m_transport(transport),
       m_ownTransport(ownTransport),
       m_transportProto(transport),
-      m_app(&m_transportProto)
+      m_app(&m_transportProto),
+      m_dataHub(dataHub)
 {
-    m_app.setSampleHandler(
-        [this](const EcgAdcProtocol::SampleFrame &frame)
-        { onSamples(frame); });
+    if (!m_dataHub)
+        throw std::invalid_argument("DeviceSession requires a DataHub");
+    m_app.setSampleHandler([this](const ApplicationProtocol::SampleFrame &frame)
+                           { onSamples(frame); });
 }
 
 DeviceSession::~DeviceSession()
 {
+    // Do not drop a trailing sub-25 ms block when the session is torn down.
+    flushPublishedSamples();
     stopRecording();
     if (m_ownTransport)
         delete m_transport;
@@ -198,6 +194,7 @@ bool DeviceSession::open()
 
 void DeviceSession::close()
 {
+    flushPublishedSamples();
     if (m_transport)
         m_transport->close();
 }
@@ -212,59 +209,67 @@ int DeviceSession::poll()
     return m_transportProto.poll();
 }
 
-int DeviceSession::startStream(const std::vector<uint8_t> &channels, EcgAdcProtocol::AckHandler onAck)
+int DeviceSession::startStream(const std::vector<uint8_t> &channels, ApplicationProtocol::AckHandler onAck)
 {
+    // Channel geometry is fixed for a stream. Any trailing data belongs to the
+    // previous stream and must be emitted before a new geometry is installed.
+    flushPublishedSamples();
+    resetPublishBatch();
     // Size the rolling buffer to the active channel count before streaming.
     m_buffer.configure(static_cast<int>(channels.size()), m_bufferCapacity);
     return m_app.startStream(channels, std::move(onAck));
 }
 
-int DeviceSession::stopStream(EcgAdcProtocol::AckHandler onAck)
+int DeviceSession::stopStream(ApplicationProtocol::AckHandler onAck)
 {
-    return m_app.stopStream(std::move(onAck));
-}
-
-int DeviceSession::setVref(uint16_t mV, EcgAdcProtocol::AckHandler onAck)
-{
-    // Kept as a compatibility pass-through for legacy callers.  The ADS1298
-    // reference is fixed internally; normal UI code never calls this method.
-    return m_app.setVref(mV, std::move(onAck));
-}
-
-int DeviceSession::setSamplerate(uint8_t idx, EcgAdcProtocol::AckHandler onAck)
-{
-    auto ack = [this, idx, onAck = std::move(onAck)](bool ok, EcgAdcProtocol::Error err)
+    // Flush immediately so callers that close the transport before the async
+    // stop ACK still receive the final partial batch. The wrapped callback
+    // flushes again after a successful ACK in case a final push arrived first.
+    flushPublishedSamples();
+    auto ack = [this, onAck = std::move(onAck)](bool ok, ApplicationProtocol::Error err)
     {
-        if (ok && idx < 4)
-            m_sampleRateHz = EcgAdcProtocol::kSampleRateHz[idx];
+        if (ok)
+            flushPublishedSamples();
+        if (onAck)
+            onAck(ok, err);
+    };
+    return m_app.stopStream(std::move(ack));
+}
+
+int DeviceSession::setSamplerate(uint8_t idx, ApplicationProtocol::AckHandler onAck)
+{
+    auto ack = [this, idx, onAck = std::move(onAck)](bool ok, ApplicationProtocol::Error err)
+    {
+        if (ok && idx < ApplicationProtocol::kSampleRateCount)
+            m_sampleRateHz = ApplicationProtocol::kSampleRateHz[idx];
         if (onAck)
             onAck(ok, err);
     };
     return m_app.setSamplerate(idx, std::move(ack));
 }
 
-int DeviceSession::setGain(uint8_t channel, uint8_t gainCode, EcgAdcProtocol::AckHandler onAck)
+int DeviceSession::setGain(uint8_t channel, uint8_t gainCode, ApplicationProtocol::AckHandler onAck)
 {
     return m_app.setGain(channel, gainCode, std::move(onAck));
 }
 
-int DeviceSession::setShortInput(bool enable, EcgAdcProtocol::AckHandler onAck)
+int DeviceSession::setShortInput(ApplicationProtocol::AckHandler onAck)
 {
-    return m_app.setShortInput(enable, std::move(onAck));
+    return m_app.setShortInput(std::move(onAck));
 }
 
-int DeviceSession::setNormalInput(EcgAdcProtocol::AckHandler onAck)
+int DeviceSession::setNormalInput(ApplicationProtocol::AckHandler onAck)
 {
     return m_app.setNormalInput(std::move(onAck));
 }
 
 int DeviceSession::setTestSignal(uint8_t amplitude, uint8_t frequency,
-                                 EcgAdcProtocol::AckHandler onAck)
+                                 ApplicationProtocol::AckHandler onAck)
 {
     return m_app.setTestSignal(amplitude, frequency, std::move(onAck));
 }
 
-int DeviceSession::getDeviceInfo(EcgAdcProtocol::DeviceInfoHandler onInfo)
+int DeviceSession::getDeviceInfo(ApplicationProtocol::DeviceInfoHandler onInfo)
 {
     return m_app.getDeviceInfo(std::move(onInfo));
 }
@@ -275,20 +280,47 @@ bool DeviceSession::startRecording(const std::string &path, const std::string &d
     if (isRecording())
         return false;
 
+    // A recording is always tied to the immutable geometry accepted by the
+    // controller. Do not trust a page-provided list: it may contain display
+    // channels or stale device metadata. The physical indices in the
+    // application protocol are the source of truth.
+    const auto &active = m_app.activeChannels();
+    if (active.empty())
+        return false;
+
+    std::vector<ChannelInfo> recordedChannels;
+    recordedChannels.reserve(active.size());
+    for (uint8_t physical : active)
+    {
+        ChannelInfo info;
+        info.physIndex = physical;
+        info.enabled = true;
+        for (const ChannelInfo &candidate : channels)
+        {
+            if (candidate.physIndex == physical)
+            {
+                info = candidate;
+                info.physIndex = physical;
+                info.enabled = true;
+                break;
+            }
+        }
+        recordedChannels.push_back(std::move(info));
+    }
+
     m_writer = std::make_unique<SessionWriter>();
     SessionHeader header;
-    header.version = 1;
+    header.version = 2;
     header.sampleRate = static_cast<uint32_t>(m_sampleRateHz);
-    header.vrefMv = EcgAdcProtocol::kFixedReferenceVoltageMv;
+    header.vrefMv = ApplicationProtocol::kFixedReferenceVoltageMv;
     header.description = description;
-    header.channels = channels;
+    header.channels = std::move(recordedChannels);
 
     if (!m_writer->open(path, header))
     {
         m_writer.reset();
         return false;
     }
-    m_recordingChannels = channels;
     return true;
 }
 
@@ -299,48 +331,91 @@ void DeviceSession::stopRecording()
         m_writer->close();
         m_writer.reset();
     }
-    m_recordingChannels.clear();
 }
 
-void DeviceSession::onSamples(const EcgAdcProtocol::SampleFrame &frame)
+void DeviceSession::resetPublishBatch()
 {
+    m_publishPending.clear();
+    m_publishChannels.clear();
+    m_publishPendingSamples = 0;
+    m_publishFirstSample = m_totalSamples;
+    m_publishLastSequence = 0;
+}
+
+void DeviceSession::publishPending(size_t count)
+{
+    if (count == 0 || count > m_publishPendingSamples || m_publishPending.empty())
+        return;
+
+    DataHub::Block block;
+    block.firstSample = m_publishFirstSample;
+    block.pushSequence = m_publishLastSequence;
+    block.sampleRateHz = m_sampleRateHz;
+    block.channels = m_publishChannels;
+    block.samples.resize(m_publishPending.size());
+    for (size_t channel = 0; channel < m_publishPending.size(); ++channel)
+    {
+        block.samples[channel].assign(m_publishPending[channel].begin(),
+                                      m_publishPending[channel].begin() +
+                                          static_cast<std::ptrdiff_t>(count));
+        m_publishPending[channel].erase(
+            m_publishPending[channel].begin(),
+            m_publishPending[channel].begin() + static_cast<std::ptrdiff_t>(count));
+    }
+    m_dataHub->publish(std::move(block));
+    m_publishPendingSamples -= count;
+    m_publishFirstSample += count;
+}
+
+void DeviceSession::flushPublishedSamples()
+{
+    if (m_publishPendingSamples > 0)
+        publishPending(m_publishPendingSamples);
+}
+
+void DeviceSession::onSamples(const ApplicationProtocol::SampleFrame &frame)
+{
+    if (frame.samples.empty() || frame.channels.empty())
+        return;
+
+    const size_t sampleCount = frame.samples.front().size();
+    if (sampleCount == 0 || frame.samples.size() != frame.channels.size())
+        return;
+    if (frame.channels != m_app.activeChannels())
+        return;
+    for (const auto &channel : frame.samples)
+        if (channel.size() != sampleCount)
+            return;
+
     // Push into the rolling buffer (channel-major -> per sample set).
     m_buffer.pushBlock(frame.samples);
 
-    // Persist if recording. Channel selection can change while a recording is
-    // active, so map each incoming physical channel into the fixed recording
-    // geometry instead of dropping the block on a size mismatch.
+    // Persist the raw stream in the exact physical order selected by
+    // StartStream. Display checkboxes never alter this data path.
     if (m_writer && m_writer->isOpen())
-    {
-        std::vector<std::vector<int32_t>> recorded(m_recordingChannels.size());
-        for (size_t rc = 0; rc < m_recordingChannels.size(); ++rc)
-        {
-            const uint8_t phys = m_recordingChannels[rc].physIndex;
-            for (size_t fc = 0; fc < frame.channels.size(); ++fc)
-                if (frame.channels[fc] == phys)
-                {
-                    recorded[rc] = frame.samples[fc];
-                    break;
-                }
-            if (recorded[rc].empty() && !frame.samples.empty())
-                recorded[rc].assign(frame.samples.front().size(), 0);
-        }
-        m_writer->writeBlock(recorded);
-    }
+        m_writer->writeBlock(frame.channels, frame.samples);
 
-    if (m_dataHub)
+    if (m_publishPending.empty())
     {
-        DataHub::Block block;
-        block.firstSample = m_totalSamples;
-        block.pushSequence = frame.pushSequence;
-        block.sampleRateHz = m_sampleRateHz;
-        block.channels = frame.channels;
-        block.samples = frame.samples;
-        m_dataHub->publish(std::move(block));
+        m_publishChannels = frame.channels;
+        m_publishPending.assign(frame.samples.size(), {});
+        m_publishFirstSample = m_totalSamples;
     }
-    if (!frame.samples.empty())
-        m_totalSamples += frame.samples.front().size();
+    // The stream geometry is immutable, so a changed frame shape is malformed
+    // and must not be mixed into the pending DataHub block.
+    if (frame.channels != m_publishChannels || frame.samples.size() != m_publishPending.size())
+        return;
 
-    if (m_sampleCb)
-        m_sampleCb(frame);
+    for (size_t channel = 0; channel < frame.samples.size(); ++channel)
+        m_publishPending[channel].insert(m_publishPending[channel].end(),
+                                         frame.samples[channel].begin(),
+                                         frame.samples[channel].end());
+    m_publishLastSequence = frame.pushSequence;
+    m_publishPendingSamples += sampleCount;
+    m_totalSamples += sampleCount;
+
+    const size_t target = std::max<size_t>(1,
+                                           (static_cast<size_t>(std::max(1, m_sampleRateHz)) * 25 + 999) / 1000);
+    while (m_publishPendingSamples >= target)
+        publishPending(target);
 }

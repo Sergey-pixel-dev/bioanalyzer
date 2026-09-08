@@ -1,9 +1,11 @@
 #include "pages/DevicePage.h"
 
 #include "app/AppContext.h"
+#include "app/acquisitionservice.h"
 #include "adapters/qtdevicediscoveryadapter.h"
 #include "adapters/qtdevicesessionadapter.h"
-#include "core/ecgadcprotocol.h"
+#include "core/applicationprotocol.h"
+#include "ui_devicepage.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -24,7 +26,6 @@ namespace
     {
         switch (cmdId)
         {
-        case 0x10: // SetVref (kept for compatibility)
         case 0x11: // SetSamplerate
         case 0x30: // SetGain
         case 0x31: // SetShortInput
@@ -60,7 +61,10 @@ DevicePage::~DevicePage() = default;
 
 void DevicePage::buildUi()
 {
-    auto *root = new QVBoxLayout(this);
+    Ui::DevicePageForm designerForm;
+    designerForm.setupUi(this);
+    auto *root = qobject_cast<QVBoxLayout *>(layout());
+    if (!root) root = new QVBoxLayout(this);
 
     // --- Discovery ---
     auto *discoveryBox = new QGroupBox(tr("Available devices"), this);
@@ -95,7 +99,7 @@ void DevicePage::buildUi()
     m_gainCombo = new QComboBox(m_settingsBox);
     for (int code = 0; code <= 6; ++code)
         m_gainCombo->addItem(QStringLiteral("×%1 V/V (code %2)")
-                                 .arg(EcgAdcProtocol::kGainValues[code]).arg(code), code);
+                                 .arg(ApplicationProtocol::kGainValues[code]).arg(code), code);
     form->addRow(tr("Gain (all selected):"), m_gainCombo);
     m_muxModeCombo = new QComboBox(m_settingsBox);
     m_muxModeCombo->addItem(tr("Normal input"), 0);
@@ -113,14 +117,16 @@ void DevicePage::buildUi()
     form->addRow(tr("Internal test frequency:"), m_testFrequencyCombo);
 
     m_sampleRateCombo = new QComboBox(m_settingsBox);
-    for (int i = 0; i < 4; ++i)
-        m_sampleRateCombo->addItem(QStringLiteral("%1 Hz").arg(EcgAdcProtocol::kSampleRateHz[i]), i);
+    // Keep the wire indices stable while presenting rates in ascending order.
+    constexpr int sampleRateDisplayIndices[] = {0, 1, 2, 4, 3};
+    for (const int i : sampleRateDisplayIndices)
+        m_sampleRateCombo->addItem(QStringLiteral("%1 Hz").arg(ApplicationProtocol::kSampleRateHz[i]), i);
     form->addRow(tr("Sample rate:"), m_sampleRateCombo);
 
     auto *chWidget = new QWidget(m_settingsBox);
     auto *chGrid = new QGridLayout(chWidget);
     chGrid->setContentsMargins(0, 0, 0, 0);
-    for (int i = 0; i < EcgAdcProtocol::kMaxChannels; ++i)
+    for (int i = 0; i < ApplicationProtocol::kMaxChannels; ++i)
     {
         auto *cb = new QCheckBox(QStringLiteral("CH%1").arg(i), chWidget);
         if (i == 0)
@@ -274,7 +280,7 @@ void DevicePage::onConnectSelected()
     if (port.isEmpty())
         return;
 
-    auto *session = new QtDeviceSessionAdapter();
+    auto *session = new QtDeviceSessionAdapter(m_context ? m_context->dataHub() : nullptr);
     Q_UNUSED(baud);
     session->setupSerial(port, 921600);
     m_context->setSession(session);
@@ -293,7 +299,8 @@ void DevicePage::onConnectionChanged(bool connected)
         m_applyInProgress = false;
         m_applyPendingAcks = 0;
         ++m_applyGeneration;
-        if (m_context) m_context->releaseMode(AppContext::AcquisitionMode::Monitoring);
+        if (m_context && m_context->acquisition())
+            m_context->acquisition()->release(AcquisitionOwner::Monitoring);
         m_streaming = false;
         m_streamButton->setText(tr("Start streaming"));
         m_statusLabel->setText(tr("Disconnected"));
@@ -307,7 +314,7 @@ void DevicePage::onConnectionChanged(bool connected)
 
 void DevicePage::onDeviceInfoChanged(int channelCount)
 {
-    m_channelCount = qBound(1, channelCount, EcgAdcProtocol::kMaxChannels);
+    m_channelCount = qBound(1, channelCount, ApplicationProtocol::kMaxChannels);
     for (int i = 0; i < m_channelChecks.size(); ++i)
     {
         const bool available = i < m_channelCount;
@@ -399,7 +406,7 @@ void DevicePage::sendNextApplyCommand()
         if (m_applyMuxMode == 1)
         {
             m_applyExpectedCommand = 0x31;
-            session->setShortInput(true);
+            session->setShortInput();
         }
         else if (m_applyMuxMode == 2)
         {
@@ -442,16 +449,11 @@ void DevicePage::toggleStreaming()
 
     if (m_streaming)
     {
-        session->stopStream();
-        if (m_context) m_context->releaseMode(AppContext::AcquisitionMode::Monitoring);
+        if (m_context && m_context->acquisition())
+            m_context->acquisition()->release(AcquisitionOwner::Monitoring);
     }
     else
     {
-        if (m_context && !m_context->acquireMode(AppContext::AcquisitionMode::Monitoring))
-        {
-            m_statusLabel->setText(tr("Device is controlled by another module"));
-            return;
-        }
         const QVector<quint8> chans = selectedChannels();
         if (chans.isEmpty())
         {
@@ -461,7 +463,10 @@ void DevicePage::toggleStreaming()
         // Sample rate is applied by Apply settings.  Do not send another
         // command immediately before StartStream: the MCU accepts one
         // outstanding command at a time and has no command queue.
-        session->startStream(chans);
+        if (m_context && m_context->acquisition() &&
+            !m_context->acquisition()->request({AcquisitionOwner::Monitoring, chans})) {
+            m_statusLabel->setText(tr("Unable to start stream"));
+        }
     }
 }
 

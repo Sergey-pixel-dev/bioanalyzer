@@ -52,6 +52,9 @@ namespace dsp
     public:
         void clear() { m_stages.clear(); }
         void add(const Biquad &stage) { m_stages.push_back(stage); }
+        // Add repeated biquad sections to realize the requested digital order.
+        void add(Biquad::Type type, double sampleRate, double frequency,
+                 double q, int digitalOrder);
 
         // Build a standard biosignal chain: optional high-pass, low-pass, and
         // 50/60 Hz notch. Pass <= 0 to skip a stage.

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>DataCollectionPageForm</class>
+ <widget class="QWidget" name="DataCollectionPageForm">
+  <property name="windowTitle"><string>Data Collection</string></property>
+  <layout class="QVBoxLayout" name="rootLayout">
+   <item>
+    <widget class="QScrollArea" name="scrollArea">
+     <property name="widgetResizable"><bool>true</bool></property>
+     <widget class="QWidget" name="scrollContents">
+      <property name="geometry"><rect><x>0</x><y>0</y><width>760</width><height>760</height></rect></property>
+      <layout class="QVBoxLayout" name="contentLayout">
+       <item>
+        <layout class="QFormLayout" name="settingsForm">
+         <item row="0" column="0"><widget class="QLabel" name="taskLabel"><property name="text"><string>Task:</string></property></widget></item>
+         <item row="0" column="1"><widget class="QComboBox" name="taskCombo"/></item>
+         <item row="1" column="0"><widget class="QLabel" name="taskIdLabel"><property name="text"><string>Task ID:</string></property></widget></item>
+         <item row="1" column="1"><widget class="QLineEdit" name="taskId"><property name="readOnly"><bool>true</bool></property></widget></item>
+         <item row="2" column="0"><widget class="QLabel" name="taskNameLabel"><property name="text"><string>Task name:</string></property></widget></item>
+         <item row="2" column="1"><widget class="QLineEdit" name="taskName"><property name="readOnly"><bool>true</bool></property></widget></item>
+         <item row="3" column="0"><widget class="QLabel" name="datasetPathLabel"><property name="text"><string>Dataset parent folder:</string></property></widget></item>
+         <item row="3" column="1">
+          <layout class="QHBoxLayout" name="pathLayout">
+           <item><widget class="QLineEdit" name="datasetPath"/></item>
+           <item><widget class="QPushButton" name="browseButton"><property name="text"><string>Browse...</string></property></widget></item>
+          </layout>
+         </item>
+         <item row="4" column="0"><widget class="QLabel" name="preparationLabel"><property name="text"><string>Preparation (s):</string></property></widget></item>
+         <item row="4" column="1"><widget class="QSpinBox" name="preparationSeconds"><property name="minimum"><number>0</number></property><property name="maximum"><number>3600</number></property><property name="value"><number>5</number></property></widget></item>
+         <item row="5" column="0"><widget class="QLabel" name="recordingLabel"><property name="text"><string>Recording (s):</string></property></widget></item>
+         <item row="5" column="1"><widget class="QSpinBox" name="recordingSeconds"><property name="minimum"><number>1</number></property><property name="maximum"><number>3600</number></property><property name="value"><number>7</number></property></widget></item>
+         <item row="6" column="0"><widget class="QLabel" name="sampleRateTitle"><property name="text"><string>Sample rate:</string></property></widget></item>
+         <item row="6" column="1"><widget class="QLabel" name="sampleRateLabel"><property name="text"><string>Not connected</string></property></widget></item>
+         <item row="7" column="0"><widget class="QLabel" name="windowSamplesLabel"><property name="text"><string>Window samples:</string></property></widget></item>
+         <item row="7" column="1"><widget class="QSpinBox" name="windowSamples"><property name="minimum"><number>0</number></property><property name="maximum"><number>100000000</number></property></widget></item>
+         <item row="8" column="0"><widget class="QLabel" name="strideSamplesLabel"><property name="text"><string>Stride samples:</string></property></widget></item>
+         <item row="8" column="1"><widget class="QSpinBox" name="strideSamples"><property name="minimum"><number>0</number></property><property name="maximum"><number>100000000</number></property></widget></item>
+         <item row="9" column="0"><widget class="QLabel" name="unitsLabel"><property name="text"><string>Units:</string></property></widget></item>
+         <item row="9" column="1"><widget class="QComboBox" name="unitsCombo"><item><property name="text"><string>uV</string></property></item><item><property name="text"><string>mV</string></property></item></widget></item>
+         <item row="10" column="0"><widget class="QLabel" name="scaleLabel"><property name="text"><string>Scale:</string></property></widget></item>
+         <item row="10" column="1"><widget class="QDoubleSpinBox" name="scaleSpin"><property name="decimals"><number>8</number></property><property name="minimum"><double>0.00000001</double></property><property name="maximum"><double>1000000000.00000000</double></property><property name="value"><double>0.00000100</double></property></widget></item>
+         <item row="11" column="0"><widget class="QLabel" name="channelsLabel"><property name="text"><string>Channels:</string></property></widget></item>
+         <item row="11" column="1"><widget class="QWidget" name="channelWidget"><layout class="QGridLayout" name="channelLayout"/></widget></item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QLabel" name="targetPlaceholder"><property name="text"><string>This capture workflow currently supports label targets only</string></property><property name="wordWrap"><bool>true</bool></property></widget>
+       </item>
+       <item>
+        <widget class="QTableWidget" name="labelsTable">
+         <property name="columnCount"><number>2</number></property>
+         <property name="rowCount"><number>0</number></property>
+         <column><property name="text"><string>Label</string></property></column>
+         <column><property name="text"><string>Repetitions</string></property></column>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="labelButtonsLayout">
+         <item><widget class="QPushButton" name="addLabelButton"><property name="text"><string>Add label</string></property></widget></item>
+         <item><widget class="QPushButton" name="removeLabelButton"><property name="text"><string>Remove label</string></property></widget></item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="captureButtonsLayout">
+         <item><widget class="QPushButton" name="startButton"><property name="text"><string>Start capture</string></property></widget></item>
+         <item><widget class="QPushButton" name="stopButton"><property name="text"><string>Stop</string></property></widget></item>
+        </layout>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

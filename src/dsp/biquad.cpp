@@ -112,6 +112,18 @@ namespace dsp
         }
     }
 
+    void FilterChain::add(Biquad::Type type, double sampleRate, double frequency,
+                          double q, int digitalOrder)
+    {
+        const int sections = std::max(1, digitalOrder);
+        for (int i = 0; i < sections; ++i)
+        {
+            Biquad stage;
+            stage.configure(type, sampleRate, frequency, q);
+            add(stage);
+        }
+    }
+
     double FilterChain::process(double x)
     {
         double y = x;

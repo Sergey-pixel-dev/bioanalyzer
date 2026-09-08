@@ -4,6 +4,10 @@
 #include "adapters/qtdevicesessionadapter.h"
 #include "adapters/qtaiworkeradapter.h"
 #include "core/datahub.h"
+#include "app/acquisitionservice.h"
+#include "app/thememanager.h"
+#include <QApplication>
+#include <QCoreApplication>
 #include <QSettings>
 
 AppContext::AppContext(QObject *parent)
@@ -11,26 +15,52 @@ AppContext::AppContext(QObject *parent)
       m_discovery(new QtDeviceDiscoveryAdapter(this))
 {
     m_dataHub = new DataHub();
+    m_themeManager = new ThemeManager(qobject_cast<QApplication *>(QCoreApplication::instance()), this);
+    QSettings settings;
+    m_themeManager->restore(settings);
     m_aiWorker = new QtAiWorkerAdapter(this);
+    m_acquisition = new AcquisitionService(this, this);
     m_recentDatasets = QSettings().value("ai/recentDatasets").toStringList();
     m_recentModels = QSettings().value("ai/recentModels").toStringList();
 }
 
-AppContext::~AppContext() { delete m_dataHub; }
+AppContext::~AppContext()
+{
+    // Session and acquisition service borrow DataHub. Destroy all QObject
+    // consumers first so their final flush/unsubscribe operations still see
+    // a live bus; QObject removes explicitly deleted children from its list.
+    delete m_session;
+    m_session = nullptr;
+    delete m_acquisition;
+    m_acquisition = nullptr;
+    m_themeManager = nullptr;
+    delete m_aiWorker;
+    m_aiWorker = nullptr;
+    delete m_discovery;
+    m_discovery = nullptr;
+    delete m_dataHub;
+    m_dataHub = nullptr;
+}
 
 void AppContext::rememberDataset(const QString &path)
 {
-    if (path.isEmpty()) return;
-    m_recentDatasets.removeAll(path); m_recentDatasets.prepend(path);
-    while (m_recentDatasets.size() > 10) m_recentDatasets.removeLast();
+    if (path.isEmpty())
+        return;
+    m_recentDatasets.removeAll(path);
+    m_recentDatasets.prepend(path);
+    while (m_recentDatasets.size() > 10)
+        m_recentDatasets.removeLast();
     QSettings().setValue("ai/recentDatasets", m_recentDatasets);
 }
 
 void AppContext::rememberModel(const QString &path)
 {
-    if (path.isEmpty()) return;
-    m_recentModels.removeAll(path); m_recentModels.prepend(path);
-    while (m_recentModels.size() > 10) m_recentModels.removeLast();
+    if (path.isEmpty())
+        return;
+    m_recentModels.removeAll(path);
+    m_recentModels.prepend(path);
+    while (m_recentModels.size() > 10)
+        m_recentModels.removeLast();
     QSettings().setValue("ai/recentModels", m_recentModels);
 }
 
@@ -44,30 +74,10 @@ void AppContext::setSession(QtDeviceSessionAdapter *session)
     if (m_session)
     {
         m_session->setParent(this);
-        m_session->setDataHub(m_dataHub);
     }
 
     emit sessionChanged(m_session);
 
     if (old)
         old->deleteLater();
-}
-
-bool AppContext::acquireMode(AcquisitionMode mode)
-{
-    if (m_mode != AcquisitionMode::Idle && m_mode != mode)
-        return false;
-    if (m_mode == mode)
-        return true;
-    m_mode = mode;
-    emit acquisitionModeChanged(m_mode);
-    return true;
-}
-
-void AppContext::releaseMode(AcquisitionMode mode)
-{
-    if (m_mode != mode)
-        return;
-    m_mode = AcquisitionMode::Idle;
-    emit acquisitionModeChanged(m_mode);
 }

@@ -126,9 +126,10 @@ int Device::write(const uint8_t *buf, int length)
     int total = 0;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(100);
+    ssize_t n;
     while (total < length)
     {
-        const ssize_t n = ::write(m_fd, buf + total, static_cast<size_t>(length - total));
+        n = ::write(m_fd, buf + total, static_cast<size_t>(length - total));
         if (n > 0)
         {
             total += static_cast<int>(n);

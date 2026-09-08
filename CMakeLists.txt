@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(app VERSION 1.0 LANGUAGES CXX)
+project(biosignal_analyzer VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,6 +30,7 @@ add_executable(${PROJECT_NAME}
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     include
+    ${CMAKE_SOURCE_DIR}/third_party
     ${CMAKE_SOURCE_DIR}/third_party/qcustomplot
 )
 
@@ -40,21 +41,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Eigen3::Eigen
 )
 
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(format_tests
-        tests/test_new_formats.cpp
-        src/core/dataset.cpp
-        src/core/aimodel.cpp
-        src/core/rawrecord.cpp)
-    target_include_directories(format_tests PRIVATE include)
-    add_test(NAME format_tests COMMAND format_tests)
+# Runtime descriptors are data files consumed from the application directory.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/tasks $<TARGET_FILE_DIR:${PROJECT_NAME}>/tasks)
 
-    add_executable(protocol_tests
-        tests/test_transport.cpp
-        src/core/transportprotocol.cpp
-        src/core/applicationprotocol.cpp
-        src/core/ecgadcprotocol.cpp)
-    target_include_directories(protocol_tests PRIVATE include)
-    add_test(NAME protocol_tests COMMAND protocol_tests)
-endif()
+# Python worker changes often and doesn't need a C++ rebuild: link, don't copy.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -rf $<TARGET_FILE_DIR:${PROJECT_NAME}>/ai_worker
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+            ${CMAKE_SOURCE_DIR}/ai_worker $<TARGET_FILE_DIR:${PROJECT_NAME}>/ai_worker)

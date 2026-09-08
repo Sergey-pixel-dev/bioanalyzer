@@ -1,7 +1,7 @@
 #ifndef DATAHUB_H
 #define DATAHUB_H
 
-#include "core/ecgadcprotocol.h"
+#include "core/applicationprotocol.h"
 #include <cstdint>
 #include <functional>
 #include <mutex>

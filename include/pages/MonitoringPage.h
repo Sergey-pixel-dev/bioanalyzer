@@ -25,6 +25,7 @@ class QPushButton;
 class QSlider;
 class QLabel;
 class QTableWidget;
+class QSplitter;
 class QCPTextElement;
 class QMouseEvent;
 class QWheelEvent;
@@ -33,7 +34,7 @@ class QWheelEvent;
 //
 // Organised into three tabs: Graphs (stacked per-channel traces), Filters
 // (enable/disable individual biquad stages and choose their application
-// order), and FFT (spectrum recomputed automatically every second). The top
+// order), and FFT (spectrum recomputed periodically). The top
 // control bar carries the display options (time window, draw rate, units) plus
 // recording and — only when a recording is loaded — playback transport.
 //
@@ -110,7 +111,7 @@ private:
     {
         dsp::Biquad::Type type = dsp::Biquad::Type::HighPass;
         QCheckBox *enable = nullptr;
-        QSpinBox *order = nullptr;
+        QSpinBox *digitalOrder = nullptr;
         QDoubleSpinBox *freq = nullptr; // corner/center frequency (Hz)
         QDoubleSpinBox *q = nullptr;    // quality factor
     };
@@ -130,7 +131,8 @@ private:
     void reprocessFilters(); // recompute every channel's filtered buffer from raw
     void resetPlotScale();
     void applyUnitLabels();
-    void rebuildChannelChecks(int channelCount);
+    void rebuildChannelChecks(const QVector<quint8> &channels);
+    void applyThemeColors();
 
 
     AppContext *m_context = nullptr;
@@ -159,14 +161,14 @@ private:
     double m_unitScale = 1.0; // µV -> display unit multiplier
     QString m_unitSuffix = QStringLiteral("µV");
     bool m_syncing = false;           // guards recursive range sync
-    bool m_followLatest = true;       // retained for reset/compatibility
+    bool m_followLatest = true;
     bool m_autoScaleY = true;         // amplitude auto-fits until the user zooms Y
     bool m_programmaticRange = false; // set while WE change axis ranges
 
 
     // Filter tab controls.
     bool m_filterEnabled = false;
-    QCheckBox *m_filterEnableCheck = nullptr;
+    QTableWidget *m_filterTable = nullptr;
     QVector<FilterStage> m_filterStages;
 
     // FFT tab controls.
@@ -174,6 +176,7 @@ private:
     QComboBox *m_fftWindowCombo = nullptr;
     QCustomPlot *m_fftPlot = nullptr;
     QTableWidget *m_harmonicsTable = nullptr;
+    QSplitter *m_fftSplitter = nullptr;
     QTimer *m_fftTimer = nullptr;
     bool m_fftAutoScale = true; // auto-fit the spectrum until the user zooms
 

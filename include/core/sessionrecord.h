@@ -6,17 +6,18 @@
 #include <vector>
 #include <fstream>
 
-// .bsig — Biosignal session recording format (v1).
+// .bsig — Biosignal session recording format (v2).
 //
 // A self-describing binary container for a monitoring session. It always
-// stores the selected physical channels; the per-channel `enabled` flag keeps
-// display/recording selection metadata alongside the samples.
+// stores the selected physical channels in their controller order. The
+// per-channel `enabled` flag is retained as metadata, but samples are always
+// written only for these active channels (never for unselected ADC inputs).
 //
 // Layout (little-endian):
 //
 //   Header:
 //     magic       4 B   "BSIG"
-//     version     u16   = 1
+//     version     u16   = 2
 //     channels    u16   number of channels stored
 //     sampleRate  u32   Hz
 //     vrefMv      u16   reference voltage in mV
@@ -25,7 +26,7 @@
 //     description descLen bytes
 //     Per channel (channels times):
 //       physIndex u8    physical ADC channel index
-//       enabled   u8    1 = real data, 0 = synthetic sine placeholder
+//       enabled   u8    metadata flag (active recordings write 1)
 //       labelLen  u16
 //       label     labelLen bytes  (UTF-8)
 //     sampleCount u64   number of sample sets (per channel)
@@ -44,7 +45,7 @@ struct ChannelInfo
 
 struct SessionHeader
 {
-    uint16_t version = 1;
+    uint16_t version = 2;
     uint32_t sampleRate = 1000;
     // ADS1298 controller uses its internal, fixed 2.4 V reference.
     uint16_t vrefMv = 2400;
@@ -64,10 +65,18 @@ public:
     bool isOpen() const { return m_file.is_open(); }
 
     // Append one sample per channel (µV). size must equal channel count.
+    /**
+     * TODO: убрать
+     */
     void writeSampleSet(const std::vector<int32_t> &values);
 
     // Append a block: samples[c] holds N samples for channel c.
     void writeBlock(const std::vector<std::vector<int32_t>> &samples);
+
+    // Append a block tagged with its physical channel order. The order must
+    // match the channel descriptors written in the header.
+    void writeBlock(const std::vector<uint8_t> &channels,
+                    const std::vector<std::vector<int32_t>> &samples);
 
     // Patch the sample count into the header and close.
     void close();
@@ -77,6 +86,7 @@ public:
 private:
     std::ofstream m_file;
     int m_channels = 0;
+    std::vector<uint8_t> m_physicalChannels;
     uint64_t m_sampleCount = 0;
     std::streampos m_countPos = 0; // where sampleCount is stored, for patching
 };

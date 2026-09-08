@@ -2,23 +2,30 @@
 
 #include <algorithm>
 
-DatasetCaptureController::DatasetCaptureController(DataHub *hub, QObject *parent)
-    : QObject(parent), m_hub(hub) {}
+DatasetCaptureEngine::DatasetCaptureEngine(DataHub *hub)
+    : m_hub(hub) {}
 
-DatasetCaptureController::~DatasetCaptureController() { stop(); }
+DatasetCaptureEngine::~DatasetCaptureEngine() { stop(); }
 
-bool DatasetCaptureController::start(const std::string &directory, const DatasetSpec &spec,
-                                     const std::vector<std::string> &labels,
-                                     int repetitions, int prepSeconds, int recordSeconds)
+bool DatasetCaptureEngine::start(const std::string &directory, const DatasetSpec &spec,
+                                 const std::vector<std::string> &labels,
+                                 int repetitions)
 {
     if (!m_hub || labels.empty() || spec.channels.empty() || spec.sampleRate == 0 ||
-        spec.windowSamples == 0 || repetitions < 1 || !m_writer.open(directory, spec))
+        spec.windowSamples == 0 || repetitions < 1)
         return false;
     m_spec = spec;
+    m_spec.task.paradigm.prepSeconds = std::max(0, m_spec.task.paradigm.prepSeconds);
+    m_spec.task.paradigm.recordSeconds = std::max(1, m_spec.task.paradigm.recordSeconds);
+    std::string error;
+    auto dataset = Dataset::create(directory, m_spec, &error);
+    if (!dataset)
+        return false;
+    m_dataset = std::move(dataset);
     m_labels = labels;
     m_repetitions = repetitions;
-    m_prep = std::max(0, prepSeconds);
-    m_duration = std::max(1, recordSeconds);
+    m_prep = m_spec.task.paradigm.prepSeconds;
+    m_duration = m_spec.task.paradigm.recordSeconds;
     m_seen = 0;
     m_running = true;
     m_history.assign(spec.channels.size(), {});
@@ -27,21 +34,24 @@ bool DatasetCaptureController::start(const std::string &directory, const Dataset
     return true;
 }
 
-void DatasetCaptureController::stop()
+void DatasetCaptureEngine::stop()
 {
     if (m_token && m_hub)
         m_hub->unsubscribe(m_token);
     m_token = 0;
     if (m_running)
     {
-        m_writer.finish("stopped");
+        if (m_dataset)
+            m_dataset->finish("stopped");
+        m_dataset.reset();
         m_running = false;
         m_history.clear();
-        emit completed(true);
+        if (m_completed)
+            m_completed(true);
     }
 }
 
-void DatasetCaptureController::onBlock(const DataHub::Block &block)
+void DatasetCaptureEngine::onBlock(const DataHub::Block &block)
 {
     if (!m_running || block.channels.size() != m_spec.channels.size() ||
         block.samples.size() != m_spec.channels.size())
@@ -64,10 +74,13 @@ void DatasetCaptureController::onBlock(const DataHub::Block &block)
         const uint64_t cycleNo = cycle ? absolute / cycle : 0;
         if (cycleNo >= totalCycles)
         {
-            m_writer.finish("complete");
+            if (m_dataset)
+                m_dataset->finish("complete");
+            m_dataset.reset();
             m_running = false;
             m_history.clear();
-            emit completed(false);
+            if (m_completed)
+                m_completed(false);
             break;
         }
         const uint64_t inCycle = cycle ? absolute % cycle : 0;
@@ -79,8 +92,14 @@ void DatasetCaptureController::onBlock(const DataHub::Block &block)
             {
                 const size_t labelIndex = static_cast<size_t>(cycleNo % m_labels.size());
                 const int repetition = static_cast<int>(cycleNo / m_labels.size());
-                emit progress(static_cast<int>(labelIndex), repetition, 0.0,
-                              QString::fromStdString(m_labels[labelIndex]));
+                TargetValue eventTarget;
+                eventTarget.type = TargetType::Label;
+                eventTarget.label = m_labels[labelIndex];
+                if (m_dataset)
+                    m_dataset->appendEvent(absolute, m_labels[labelIndex], eventTarget);
+                if (m_progress)
+                    m_progress(static_cast<int>(labelIndex), repetition, 0.0,
+                               m_labels[labelIndex]);
             }
             continue;
         }
@@ -115,9 +134,16 @@ void DatasetCaptureController::onBlock(const DataHub::Block &block)
         // `absolute` is the sample position in the capture timeline; unlike
         // the index within this push block it cannot underflow when a window
         // spans two or more blocks.
-        m_writer.append(m_labels[labelIndex], example, absolute + 1 - window);
-        emit progress(static_cast<int>(labelIndex), repetition,
-                      double(recorded + 1) / double(m_spec.sampleRate),
-                      QString::fromStdString(m_labels[labelIndex]));
+        ExampleRecord record;
+        record.sourceSample = absolute + 1 - window;
+        record.target.type = TargetType::Label;
+        record.target.label = m_labels[labelIndex];
+        record.samples = std::move(example);
+        if (m_dataset)
+            m_dataset->append(record);
+        if (m_progress)
+            m_progress(static_cast<int>(labelIndex), repetition,
+                       double(recorded + 1) / double(m_spec.sampleRate),
+                       m_labels[labelIndex]);
     }
 }

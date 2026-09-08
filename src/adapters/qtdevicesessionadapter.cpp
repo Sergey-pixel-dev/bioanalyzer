@@ -24,9 +24,10 @@ namespace
     }
 }
 
-QtDeviceSessionAdapter::QtDeviceSessionAdapter(QObject *parent)
-    : QObject(parent)
+QtDeviceSessionAdapter::QtDeviceSessionAdapter(DataHub *hub, QObject *parent)
+    : QObject(parent), m_dataHub(hub)
 {
+    Q_ASSERT(m_dataHub);
     ensureMetaTypes();
 }
 
@@ -34,12 +35,6 @@ QtDeviceSessionAdapter::~QtDeviceSessionAdapter()
 {
     disconnectDevice();
     teardownSession();
-}
-
-void QtDeviceSessionAdapter::setDataHub(DataHub *hub)
-{
-    if (m_session)
-        m_session->setDataHub(hub);
 }
 
 void QtDeviceSessionAdapter::teardownSession()
@@ -62,11 +57,8 @@ void QtDeviceSessionAdapter::setupSerial(const QString &portPath, int baud)
     m_shortInputEnabled = false;
     m_testModeEnabled = false;
     m_streaming = false;
-    m_sampleRateHz = EcgAdcProtocol::kSampleRateHz[EcgAdcProtocol::kDefaultSampleRateIndex];
-    m_session = std::make_unique<DeviceSession>(dev, /*ownTransport=*/true);
-    m_session->setSampleCallback(
-        [this](const EcgAdcProtocol::SampleFrame &frame)
-        { emitSampleFrame(frame); });
+    m_sampleRateHz = ApplicationProtocol::kSampleRateHz[ApplicationProtocol::kDefaultSampleRateIndex];
+    m_session = std::make_unique<DeviceSession>(dev, m_dataHub, /*ownTransport=*/true);
 }
 
 bool QtDeviceSessionAdapter::setupPlayback(const QString &recordingPath)
@@ -90,11 +82,8 @@ bool QtDeviceSessionAdapter::setupPlayback(const QString &recordingPath)
     m_streaming = false;
     m_sampleRateHz = phantom->recordingHeader().sampleRate;
     m_channelCount = static_cast<int>(phantom->recordingHeader().channels.size());
-    m_session = std::make_unique<DeviceSession>(phantom, /*ownTransport=*/true);
+    m_session = std::make_unique<DeviceSession>(phantom, m_dataHub, /*ownTransport=*/true);
     m_session->setSampleRateHz(m_sampleRateHz);
-    m_session->setSampleCallback(
-        [this](const EcgAdcProtocol::SampleFrame &frame)
-        { emitSampleFrame(frame); });
     return true;
 }
 
@@ -130,14 +119,13 @@ void QtDeviceSessionAdapter::connectDevice()
 
     // Query device capabilities once the transport is open. The result is
     // forwarded to pages so channel selectors can match the actual hardware.
-    m_session->getDeviceInfo([this](bool ok, const EcgAdcProtocol::DeviceInfo &info)
-    {
+    m_session->getDeviceInfo([this](bool ok, const ApplicationProtocol::DeviceInfo &info)
+                             {
         if (ok && info.channelCount > 0)
         {
             m_channelCount = info.channelCount;
             emit deviceInfoChanged(m_channelCount);
-        }
-    });
+        } });
 
     // Spin up a worker thread that pumps poll() (and phantom playback).
     m_worker = new QThread(this);
@@ -195,35 +183,20 @@ void QtDeviceSessionAdapter::pollOnce()
         emit playbackPositionChanged(m_phantom->positionSample());
 }
 
-void QtDeviceSessionAdapter::setVref(int mV)
-{
-    if (!m_session)
-        return;
-    // The ADS1298 reference is hard-wired to 2.4 V. Keep this slot for source
-    // compatibility with older callers: the firmware accepts the legacy
-    // value as a no-op compatibility command, while the current UI does not
-    // expose a mutable reference-voltage setting.
-    const int result = m_session->setVref(
-        static_cast<uint16_t>(mV),
-        [this](bool ok, ApplicationProtocol::Error err)
-        { emit commandAck(0x10, ok, static_cast<int>(err)); });
-    if (result < 0)
-        emit commandAck(0x10, false, -1);
-}
-
 void QtDeviceSessionAdapter::setSampleRateIndex(int idx)
 {
     if (!m_session || m_streaming)
     {
-        if (m_streaming) emit errorOccurred(QStringLiteral("Stop streaming before changing sample rate"));
+        if (m_streaming)
+            emit errorOccurred(QStringLiteral("Stop streaming before changing sample rate"));
         return;
     }
     const int result = m_session->setSamplerate(
         static_cast<uint8_t>(idx),
         [this, idx](bool ok, ApplicationProtocol::Error err)
         {
-            if (ok && idx >= 0 && idx < 4)
-                m_sampleRateHz = EcgAdcProtocol::kSampleRateHz[idx];
+            if (ok && idx >= 0 && idx < ApplicationProtocol::kSampleRateCount)
+                m_sampleRateHz = ApplicationProtocol::kSampleRateHz[idx];
             emit commandAck(0x11, ok, static_cast<int>(err));
         });
     if (result < 0)
@@ -245,13 +218,8 @@ void QtDeviceSessionAdapter::setGain(int channel, int gainCode)
     if (result < 0)
         emit commandAck(0x30, false, -1);
 }
-void QtDeviceSessionAdapter::setShortInput(bool enable)
+void QtDeviceSessionAdapter::setShortInput()
 {
-    if (!enable)
-    {
-        setNormalInput();
-        return;
-    }
     if (!m_session || m_streaming)
     {
         if (m_streaming)
@@ -259,7 +227,7 @@ void QtDeviceSessionAdapter::setShortInput(bool enable)
         return;
     }
     const int result = m_session->setShortInput(
-        true, [this](bool ok, ApplicationProtocol::Error e)
+        [this](bool ok, ApplicationProtocol::Error e)
         {
             if (ok)
             {
@@ -302,9 +270,16 @@ void QtDeviceSessionAdapter::setNormalInput()
     if (result < 0)
         emit commandAck(0x33, false, -1);
 }
-void QtDeviceSessionAdapter::setTestSignal(int amplitude,int frequency){
-    if(!m_session||m_streaming){if(m_streaming)emit errorOccurred(QStringLiteral("Stop streaming before changing MUX mode"));return;}
-    const int result = m_session->setTestSignal(uint8_t(amplitude),uint8_t(frequency),[this](bool ok,ApplicationProtocol::Error e){
+void QtDeviceSessionAdapter::setTestSignal(int amplitude, int frequency)
+{
+    if (!m_session || m_streaming)
+    {
+        if (m_streaming)
+            emit errorOccurred(QStringLiteral("Stop streaming before changing MUX mode"));
+        return;
+    }
+    const int result = m_session->setTestSignal(uint8_t(amplitude), uint8_t(frequency), [this](bool ok, ApplicationProtocol::Error e)
+                                                {
         if(ok){
             // Both amplitudes select the internal test MUX; amplitude only
             // changes the generated signal level. This mode excludes short.
@@ -315,8 +290,7 @@ void QtDeviceSessionAdapter::setTestSignal(int amplitude,int frequency){
             emit muxTestChanged(false);
             emit testModeChanged(true);
         }
-        emit commandAck(0x32,ok,int(e));
-    });
+        emit commandAck(0x32,ok,int(e)); });
     if (result < 0)
         emit commandAck(0x32, false, -1);
 }
@@ -339,7 +313,8 @@ void QtDeviceSessionAdapter::startStream(const QVector<quint8> &channels)
                                // channel selection.
                                if (ok && m_phantom && !wasPlaying)
                                    m_phantom->pause();
-                               if (ok) m_streaming = true;
+                               if (ok)
+                                   m_streaming = true;
                                emit commandAck(0x01, ok, static_cast<int>(err));
                            });
 }
@@ -371,7 +346,10 @@ void QtDeviceSessionAdapter::startRecording(const QString &path, const QString &
         infos.push_back(ci);
     }
     if (!m_session->startRecording(path.toStdString(), description.toStdString(), infos))
+    {
         emit errorOccurred(QStringLiteral("Failed to start recording: %1").arg(path));
+        return;
+    }
 }
 
 void QtDeviceSessionAdapter::stopRecording()
@@ -402,25 +380,4 @@ void QtDeviceSessionAdapter::setPlaybackSpeed(double factor)
 {
     if (m_phantom)
         m_phantom->setSpeed(factor);
-}
-
-void QtDeviceSessionAdapter::emitSampleFrame(const EcgAdcProtocol::SampleFrame &frame)
-{
-    SampleBlock block;
-    block.channels.reserve(static_cast<int>(frame.channels.size()));
-    for (uint8_t c : frame.channels)
-        block.channels.push_back(c);
-
-    block.samples.reserve(static_cast<int>(frame.samples.size()));
-    for (const auto &chan : frame.samples)
-    {
-        QVector<qint32> v;
-        v.reserve(static_cast<int>(chan.size()));
-        for (int32_t s : chan)
-            v.push_back(s);
-        block.samples.push_back(std::move(v));
-    }
-
-    // Emitted from the worker thread; UI connects queued so this hops to GUI.
-    emit samplesReady(block);
 }

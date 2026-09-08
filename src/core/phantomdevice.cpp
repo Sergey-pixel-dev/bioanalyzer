@@ -8,7 +8,7 @@ namespace
     constexpr uint8_t kStart = 0xAA;
     constexpr uint8_t kEsc = 0xBB;
 
-    // Application command IDs (mirrors EcgAdcProtocol::Cmd).
+    // Application command IDs (mirrors ApplicationProtocol::Cmd).
     constexpr uint8_t kStartStream = 0x01;
     constexpr uint8_t kStopStream = 0x02;
     constexpr uint8_t kSetVref = 0x10;
@@ -24,7 +24,7 @@ namespace
     constexpr uint8_t kError = 0xEE;
     constexpr uint8_t kPush = 0xFF;
 
-    constexpr int kSampleRateHz[4] = {250, 500, 1000, 4000};
+    constexpr int kSampleRateHz[5] = {250, 500, 1000, 4000, 2000};
 
     void encodeI24(std::vector<uint8_t> &out, int32_t v)
     {
@@ -280,7 +280,7 @@ void PhantomDevice::handleCommand(const uint8_t *payload, int len)
             queueError(m_rxSeq, 0x06);
             return;
         }
-        if (payload[1] > 0x03)
+        if (payload[1] >= 5)
         {
             queueError(m_rxSeq, 0x02);
             return;
@@ -292,7 +292,8 @@ void PhantomDevice::handleCommand(const uint8_t *payload, int len)
     case kSetGain:
         if (m_streaming || len != 3 || payload[1] > 7 || payload[2] > 6)
             queueError(m_rxSeq, 0x02);
-        else queueResponseOk(m_rxSeq);
+        else
+            queueResponseOk(m_rxSeq);
         break;
     case kSetShortInput:
         if (len != 1)
