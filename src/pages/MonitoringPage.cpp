@@ -134,7 +134,7 @@ namespace
             drag->setPixmap(pixmap);
             drag->setHotSpot(QPoint(12, rowHeight / 2));
             drag->exec(supportedActions & Qt::MoveAction ? Qt::MoveAction
-                                                          : supportedActions);
+                                                         : supportedActions);
         }
 
         void dropEvent(QDropEvent *event) override
@@ -298,7 +298,8 @@ MonitoringPage::MonitoringPage(AppContext *context, QWidget *parent)
                 this, &MonitoringPage::onSessionChanged);
         if (m_context->themeManager())
             connect(m_context->themeManager(), &ThemeManager::themeChanged,
-                    this, [this](AppTheme) { applyThemeColors(); });
+                    this, [this](AppTheme)
+                    { applyThemeColors(); });
         onSessionChanged(m_context->session());
     }
 }
@@ -517,7 +518,7 @@ QWidget *MonitoringPage::buildFilterTab()
     m_filterTable = filterTable;
     m_filterTable->setColumnCount(5);
     m_filterTable->setHorizontalHeaderLabels({tr("Enabled"), tr("Filter"),
-                                               tr("Digital order"), tr("Frequency (Hz)"), tr("Q")});
+                                              tr("Digital order"), tr("Frequency (Hz)"), tr("Q")});
     m_filterTable->horizontalHeaderItem(2)->setToolTip(
         tr("Number of cascaded biquad sections; the effective filter order is twice this value."));
     m_filterTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
@@ -591,7 +592,8 @@ QWidget *MonitoringPage::buildFilterTab()
 
     connect(applyBtn, &QPushButton::clicked, this, &MonitoringPage::applyFilters);
     connect(clearBtn, &QPushButton::clicked, this, &MonitoringPage::clearFilters);
-    filterTable->orderChanged = [this] { updateFilterChains(); };
+    filterTable->orderChanged = [this]
+    { updateFilterChains(); };
 
     return tab;
 }
@@ -1252,9 +1254,9 @@ void MonitoringPage::computeFft()
         mags.push_back(m * m_unitScale);
     m_fftPlot->graph(0)->setData(freqs, mags, true);
     m_fftPlot->graph(0)->setPen(QPen(channelColor(cv.physIndex,
-                                                   m_context && m_context->themeManager()
-                                                       ? m_context->themeManager()->isDark()
-                                                       : true)));
+                                                  m_context && m_context->themeManager()
+                                                      ? m_context->themeManager()->isDark()
+                                                      : true)));
     // Only auto-fit while the user has not zoomed; otherwise hold their view.
     if (m_fftAutoScale)
         m_fftPlot->rescaleAxes();
@@ -1278,7 +1280,8 @@ void MonitoringPage::applyThemeColors()
     const QColor grid = dark ? QColor(65, 70, 80) : QColor(205, 210, 218);
     auto styleAxis = [&](QCPAxis *axis)
     {
-        if (!axis) return;
+        if (!axis)
+            return;
         axis->setBasePen(QPen(foreground));
         axis->setTickPen(QPen(foreground));
         axis->setSubTickPen(QPen(foreground));

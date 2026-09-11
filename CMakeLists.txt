@@ -43,6 +43,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 # Runtime descriptors are data files consumed from the application directory.
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -rf $<TARGET_FILE_DIR:${PROJECT_NAME}>/tasks
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/tasks $<TARGET_FILE_DIR:${PROJECT_NAME}>/tasks)
 

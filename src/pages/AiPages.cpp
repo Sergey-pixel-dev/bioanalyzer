@@ -41,6 +41,16 @@
 #include <cmath>
 #include <exception>
 
+namespace
+{
+    bool isSupportedCaptureTask(const TaskDescriptor &descriptor)
+    {
+        return descriptor.taskType == TaskType::Classification &&
+               descriptor.targetType == TargetType::Label &&
+               descriptor.paradigm.kind == ParadigmSpec::Kind::CueSchedule;
+    }
+}
+
 AiPageBase::AiPageBase(AppContext *c, const QString &t, QWidget *p) : QWidget(p), m_context(c)
 {
     Ui::AiPagesForm form;
@@ -85,6 +95,7 @@ DataCollectionPage::DataCollectionPage(AppContext *c, QWidget *p)
     m_form = form.settingsForm;
 
     connect(form.browseButton, &QPushButton::clicked, this, &DataCollectionPage::choosePath);
+    /*TODO, индекс при запуске получается меняется? чтобы вызывался chooseTask, это необходимое условие */
     connect(m_taskCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &DataCollectionPage::chooseTask);
     connect(form.addLabelButton, &QPushButton::clicked, this, &DataCollectionPage::addLabel);
     connect(form.removeLabelButton, &QPushButton::clicked, this, &DataCollectionPage::removeLabel);
@@ -105,8 +116,7 @@ DataCollectionPage::DataCollectionPage(AppContext *c, QWidget *p)
                     this, [this](AcquisitionOwner)
                     {
                         updateChannelWidgets();
-                        updateCaptureRateUi();
-                    });
+                        updateCaptureRateUi(); });
         onSessionChanged(c->session());
     }
 }
@@ -120,7 +130,8 @@ void DataCollectionPage::loadTasks()
     {
         TaskDescriptor d;
         std::string err;
-        if (loadTaskDescriptor(dir.filePath(file).toStdString(), d, &err))
+        if (loadTaskDescriptor(dir.filePath(file).toStdString(), d, &err) &&
+            isSupportedCaptureTask(d))
             m_taskCombo->addItem(QString::fromStdString(d.displayName), dir.filePath(file));
     }
     if (m_taskCombo->count() > 0)
@@ -138,6 +149,14 @@ void DataCollectionPage::chooseTask(int index)
         m_descriptorLoaded = false;
         return;
     }
+    if (!isSupportedCaptureTask(d))
+    {
+        m_status->setText(tr("Unsupported task: this page supports classification cue schedules only"));
+        m_descriptorLoaded = false;
+        updateTargetModeUi();
+        return;
+    }
+
     m_descriptor = d;
     m_descriptorLoaded = true;
     m_taskId->setText(QString::fromStdString(d.taskId));
@@ -196,13 +215,10 @@ void DataCollectionPage::onSessionChanged(QtDeviceSessionAdapter *session)
                 this, [this](bool)
                 {
                     updateChannelWidgets();
-                    updateCaptureRateUi();
-                });
+                    updateCaptureRateUi(); });
         connect(session, &QtDeviceSessionAdapter::commandAck,
                 this, [this](int, bool, int)
-                {
-                    updateCaptureRateUi();
-                });
+                { updateCaptureRateUi(); });
         updateCaptureRateUi();
     }
     else
@@ -226,7 +242,7 @@ void DataCollectionPage::updateCaptureRateUi()
         if (widget)
             widget->setEnabled(connected && (!m_capture || !m_capture->running()));
     if (m_start)
-        m_start->setEnabled(connected && m_descriptorLoaded && m_descriptor.targetType == TargetType::Label &&
+        m_start->setEnabled(connected && m_descriptorLoaded && isSupportedCaptureTask(m_descriptor) &&
                             (!m_capture || !m_capture->running()));
     if (rate <= 0 || !m_descriptorLoaded)
         return;
@@ -246,6 +262,7 @@ void DataCollectionPage::updateCaptureRateUi()
 QVector<quint8> DataCollectionPage::selectedChannels() const
 {
     QVector<quint8> result;
+    /* TODO: мы же берем каналы из devicesession (или acquisition) */
     for (int i = 0; i < m_channels.size(); ++i)
         if (m_channels[i]->isChecked())
             result.push_back(static_cast<quint8>(i));
@@ -284,14 +301,14 @@ void DataCollectionPage::updateChannelWidgets()
 
 void DataCollectionPage::updateTargetModeUi()
 {
-    const bool labels = m_descriptorLoaded && m_descriptor.targetType == TargetType::Label;
+    const bool labels = m_descriptorLoaded && isSupportedCaptureTask(m_descriptor);
     m_labels->setEnabled(labels);
     if (m_addLabelButton)
         m_addLabelButton->setEnabled(labels);
     if (m_removeLabelButton)
         m_removeLabelButton->setEnabled(labels);
     m_targetPlaceholder->setVisible(!labels);
-    m_targetPlaceholder->setText(labels ? QString() : tr("This capture workflow currently supports label targets only"));
+    m_targetPlaceholder->setText(labels ? QString() : tr("This capture workflow supports classification cue schedules with label targets only"));
     const bool connected = m_context && m_context->session() && m_context->session()->isConnected();
     m_start->setEnabled(connected && labels && (!m_capture || !m_capture->running()));
 }
@@ -327,7 +344,8 @@ bool DataCollectionPage::validateCapture(const DatasetSpec &spec, QString *error
     {
         if (error)
             *error = tr("The descriptor requires %1 Hz, but the device is running at %2 Hz. Change it on the Devices page.")
-                         .arg(m_descriptor.capture.sampleRate).arg(actualRate);
+                         .arg(m_descriptor.capture.sampleRate)
+                         .arg(actualRate);
         return false;
     }
     if (!m_descriptor.capture.channels.empty())
@@ -344,23 +362,27 @@ bool DataCollectionPage::validateCapture(const DatasetSpec &spec, QString *error
     }
     if (spec.channels.empty())
     {
-        if (error) *error = tr("Select at least one channel.");
+        if (error)
+            *error = tr("Select at least one channel.");
         return false;
     }
     if (spec.windowSamples == 0 || spec.strideSamples == 0 || spec.strideSamples > spec.windowSamples)
     {
-        if (error) *error = tr("Stride must be positive and no greater than window size.");
+        if (error)
+            *error = tr("Stride must be positive and no greater than window size.");
         return false;
     }
     const size_t maxWindow = static_cast<size_t>(std::max(1, m_duration->value())) * spec.sampleRate;
     if (spec.windowSamples > maxWindow)
     {
-        if (error) *error = tr("Window size must not exceed the recording duration (%1 samples).").arg(maxWindow);
+        if (error)
+            *error = tr("Window size must not exceed the recording duration (%1 samples).").arg(maxWindow);
         return false;
     }
     if (!std::isfinite(spec.scale) || spec.scale <= 0.0)
     {
-        if (error) *error = tr("Scale must be a positive finite number.");
+        if (error)
+            *error = tr("Scale must be a positive finite number.");
         return false;
     }
     return true;
@@ -381,9 +403,9 @@ void DataCollectionPage::start()
         m_status->setText(tr("Select a valid task descriptor"));
         return;
     }
-    if (m_descriptor.targetType != TargetType::Label)
+    if (!isSupportedCaptureTask(m_descriptor))
     {
-        m_status->setText(tr("This capture page currently supports label targets only"));
+        m_status->setText(tr("This capture page supports classification cue schedules with label targets only"));
         return;
     }
     if (m_path->text().trimmed().isEmpty())
@@ -402,6 +424,7 @@ void DataCollectionPage::start()
         QMessageBox::warning(this, tr("Capture settings"), validationError);
         return;
     }
+    /* TODO: подумай еще раз над необходимостью acquisition service, может лучше просто дать возможность запускать поток только Device Page? */
     if (m_context->acquisition() && m_context->acquisition()->hasOwner() &&
         !m_context->acquisition()->isOwner(AcquisitionOwner::DatasetCapture))
     {
@@ -634,8 +657,7 @@ TrainingPage::TrainingPage(AppContext *c, QWidget *p) : AiPageBase(c, "Training"
                     m_training = false;
                     setTrainingControlsEnabled(m_datasetValid);
                     m_trainingStop->setEnabled(false);
-                    m_status->setText(tr("Model saved: %1").arg(p));
-                });
+                    m_status->setText(tr("Model saved: %1").arg(p)); });
         connect(c->aiWorker(), &QtAiWorkerAdapter::errorOccurred, this, [this](const QString &e)
                 { if (m_training) { m_training = false; setTrainingControlsEnabled(m_datasetValid); m_status->setText(tr("Error: %1").arg(e)); } });
         connect(c->aiWorker(), &QtAiWorkerAdapter::finished, this, [this](bool)
@@ -670,7 +692,7 @@ void TrainingPage::loadModelFamilies()
     const QDir modelsDir(QDir(QCoreApplication::applicationDirPath())
                              .filePath(QStringLiteral("ai_worker/models")));
     const QStringList files = modelsDir.entryList({QStringLiteral("*.py")},
-                                                   QDir::Files, QDir::Name);
+                                                  QDir::Files, QDir::Name);
     for (const QString &file : files)
     {
         const QString family = QFileInfo(file).completeBaseName();
@@ -903,13 +925,11 @@ InferencePage::InferencePage(AppContext *c, QWidget *p) : AiPageBase(c, "Inferen
         connect(c->aiWorker(), &QtAiWorkerAdapter::started, this, [this]
                 {
                     if (m_running)
-                        m_status->setText(tr("Inference worker ready; collecting data"));
-                });
+                        m_status->setText(tr("Inference worker ready; collecting data")); });
         connect(c->aiWorker(), &QtAiWorkerAdapter::errorOccurred, this, [this](const QString &message)
                 {
                     if (m_running)
-                        m_status->setText(tr("Inference error: %1").arg(message));
-                });
+                        m_status->setText(tr("Inference error: %1").arg(message)); });
         connect(c->aiWorker(), &QtAiWorkerAdapter::finished, this, [this](bool ok)
                 {
                     if (m_running)
@@ -925,8 +945,7 @@ InferencePage::InferencePage(AppContext *c, QWidget *p) : AiPageBase(c, "Inferen
                         m_inferenceStride->setEnabled(m_modelLoaded);
                         m_status->setText(ok ? tr("Inference worker stopped")
                                              : tr("Inference worker exited with an error"));
-                    }
-                });
+                    } });
         connect(c->aiWorker(), &QtAiWorkerAdapter::inferenceOutput, this, [this](const QJsonObject &out)
                 {
                     if (!m_running)
@@ -968,8 +987,7 @@ InferencePage::InferencePage(AppContext *c, QWidget *p) : AiPageBase(c, "Inferen
                     }
                     m_status->setText(tr("Inference result received (%1 window%2)")
                                           .arg(m_windowsSent)
-                                          .arg(m_windowsSent == 1 ? QString() : QStringLiteral("s")));
-                });
+                                          .arg(m_windowsSent == 1 ? QString() : QStringLiteral("s"))); });
         connect(c->acquisition(), &AcquisitionService::samplesReady,
                 this, &InferencePage::onBlock, Qt::UniqueConnection);
     }
@@ -1130,7 +1148,8 @@ void InferencePage::start()
     m_inferenceStride->setEnabled(false);
     m_context->aiWorker()->startInference(m_model->text(), QString::fromStdString(info.modelFamily));
     m_status->setText(tr("Inference started; waiting for a %1-sample window (stride %2)")
-                          .arg(m_spec.windowSamples).arg(stride));
+                          .arg(m_spec.windowSamples)
+                          .arg(stride));
 }
 void InferencePage::stop()
 {
@@ -1196,8 +1215,7 @@ void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
         QMetaObject::invokeMethod(this, [this, flat, rows, channels]
                                   {
                                       if (m_context && m_running)
-                                          m_context->aiWorker()->sendWindow(flat, rows, channels);
-                                  }, Qt::QueuedConnection);
+                                          m_context->aiWorker()->sendWindow(flat, rows, channels); }, Qt::QueuedConnection);
         ++m_windowsSent;
     }
     m_seen = m_windowAccumulator.bufferedSamples();
@@ -1213,7 +1231,8 @@ void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
     }
     else if (m_running && !windows.empty())
         m_status->setText(tr("Inference windows queued: %1; results received: %2")
-                              .arg(m_windowsSent).arg(m_resultsReceived));
+                              .arg(m_windowsSent)
+                              .arg(m_resultsReceived));
 }
 
 void InferencePage::onStrideChanged(int samples)

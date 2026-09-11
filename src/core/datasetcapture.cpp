@@ -11,7 +11,10 @@ bool DatasetCaptureEngine::start(const std::string &directory, const DatasetSpec
                                  const std::vector<std::string> &labels,
                                  int repetitions)
 {
-    if (!m_hub || labels.empty() || spec.channels.empty() || spec.sampleRate == 0 ||
+    if (!m_hub || spec.task.taskType != TaskType::Classification ||
+        spec.task.targetType != TargetType::Label ||
+        spec.task.paradigm.kind != ParadigmSpec::Kind::CueSchedule ||
+        labels.empty() || spec.channels.empty() || spec.sampleRate == 0 ||
         spec.windowSamples == 0 || repetitions < 1)
         return false;
     m_spec = spec;
