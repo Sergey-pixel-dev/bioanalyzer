@@ -59,7 +59,7 @@ target_link_libraries(monitoring PUBLIC
 # stream ownership and on DataHub for sample delivery.
 bsa_module(ai)
 target_link_libraries(ai PUBLIC
-    datahub device notifications
+    datahub device notifications settings
     Qt6::Widgets Qt6::Concurrent)
 
 # Settings: theme and (later) application-scope preferences.

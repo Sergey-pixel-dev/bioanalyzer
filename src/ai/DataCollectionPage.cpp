@@ -125,13 +125,13 @@ void DataCollectionPage::chooseTask(int index)
     std::string err;
     if (!loadTaskDescriptor(m_taskCombo->itemData(index).toString().toStdString(), d, &err))
     {
-        m_status->setText(tr("Task error: %1").arg(QString::fromStdString(err)));
+        setStatus(tr("Task error: %1").arg(QString::fromStdString(err)));
         m_descriptorLoaded = false;
         return;
     }
     if (!isSupportedCaptureTask(d))
     {
-        m_status->setText(tr("Unsupported task: this page supports classification cue schedules only"));
+        setStatus(tr("Unsupported task: this page supports classification cue schedules only"));
         m_descriptorLoaded = false;
         updateTargetModeUi();
         return;
@@ -214,7 +214,7 @@ void DataCollectionPage::updateCaptureRateUi()
     m_sampleRateLabel->setText(rate > 0 ? tr("%1 Hz").arg(rate) : tr("Not connected"));
     const bool connected = m_context && m_context->session() && m_context->session()->isConnected();
     if (!connected && (!m_capture || !m_capture->running()))
-        m_status->setText(tr("Connect a device to configure capture settings"));
+        setStatus(tr("Connect a device to configure capture settings"));
     for (QWidget *widget : {static_cast<QWidget *>(m_prep), static_cast<QWidget *>(m_duration),
                             static_cast<QWidget *>(m_windowSamples), static_cast<QWidget *>(m_strideSamples),
                             static_cast<QWidget *>(m_units), static_cast<QWidget *>(m_scale),
@@ -375,23 +375,23 @@ void DataCollectionPage::start()
     auto *liveSession = m_context->session();
     if (!liveSession || !liveSession->isConnected())
     {
-        m_status->setText(tr("Connect a device first"));
+        setStatus(tr("Connect a device first"));
         return;
     }
     if (!m_descriptorLoaded)
     {
-        m_status->setText(tr("Select a valid task descriptor"));
+        setStatus(tr("Select a valid task descriptor"));
         return;
     }
     if (!isSupportedCaptureTask(m_descriptor))
     {
-        m_status->setText(tr("This capture page supports classification cue schedules with label targets only"));
+        setStatus(tr("This capture page supports classification cue schedules with label targets only"));
         return;
     }
     if (m_path->text().trimmed().isEmpty())
     {
         const QString message = tr("Choose a dataset folder first.");
-        m_status->setText(message);
+        setStatus(message);
         m_context->notifications()->warning(this, tr("Capture settings"), message);
         return;
     }
@@ -400,7 +400,7 @@ void DataCollectionPage::start()
     QString validationError;
     if (!validateCapture(s, &validationError))
     {
-        m_status->setText(validationError);
+        setStatus(validationError);
         m_context->notifications()->warning(this, tr("Capture settings"), validationError);
         return;
     }
@@ -408,7 +408,7 @@ void DataCollectionPage::start()
     if (m_context->acquisition() && m_context->acquisition()->hasOwner() &&
         !m_context->acquisition()->isOwner(AcquisitionOwner::DatasetCapture))
     {
-        m_status->setText(tr("Stop the current stream on the Devices page, then start capture again"));
+        setStatus(tr("Stop the current stream on the Devices page, then start capture again"));
         return;
     }
     // Build a randomized schedule while avoiding consecutive repetitions whenever
@@ -462,7 +462,7 @@ void DataCollectionPage::start()
     }
     if (labels.empty())
     {
-        m_status->setText(tr("Add at least one gesture label"));
+        setStatus(tr("Add at least one gesture label"));
         return;
     }
     // Persist the edited vocabulary in the descriptor. The randomized schedule
@@ -507,7 +507,7 @@ void DataCollectionPage::start()
             !m_context->acquisition()->request({AcquisitionOwner::DatasetCapture, channels}))
         {
             m_capture->stop();
-            m_status->setText(tr("Unable to start device stream"));
+            setStatus(tr("Unable to start device stream"));
             return;
         }
     }
@@ -521,7 +521,7 @@ void DataCollectionPage::start()
         if (m_context->acquisition())
             m_context->acquisition()->release(AcquisitionOwner::DatasetCapture);
         const QString message = tr("Unable to create dataset folder: %1").arg(QString::fromUtf8(e.what()));
-        m_status->setText(message);
+        setStatus(message);
         m_context->notifications()->warning(this, tr("Capture settings"), message);
         return;
     }
@@ -529,12 +529,12 @@ void DataCollectionPage::start()
     {
         if (m_context->acquisition())
             m_context->acquisition()->release(AcquisitionOwner::DatasetCapture);
-        m_status->setText(tr("Unable to open dataset"));
+        setStatus(tr("Unable to open dataset"));
         return;
     }
     m_start->setEnabled(false);
     m_stop->setEnabled(true);
-    m_status->setText(tr("Cycle started"));
+    setStatus(tr("Cycle started"));
     disconnect(m_capture.get(), nullptr, this, nullptr);
     connect(m_capture.get(), &QtDatasetCaptureAdapter::progress,
             this, &DataCollectionPage::onCaptureProgress);
@@ -576,7 +576,7 @@ void DataCollectionPage::stop()
 void DataCollectionPage::onCaptureProgress(int labelIndex, int repetition,
                                            double seconds, const QString &label)
 {
-    m_status->setText(tr("Recording %1 (%2 s)").arg(label).arg(seconds, 0, 'f', 1));
+    setStatus(tr("Recording %1 (%2 s)").arg(label).arg(seconds, 0, 'f', 1));
     if (m_cueDialog)
         m_cueDialog->updateProgress(labelIndex, repetition, seconds, label);
 }
@@ -592,5 +592,5 @@ void DataCollectionPage::onCaptureCompleted(bool stopped)
         m_cueDialog->finish(stopped);
         m_cueDialog.reset();
     }
-    m_status->setText(stopped ? tr("Capture stopped") : tr("Capture complete"));
+    setStatus(stopped ? tr("Capture stopped") : tr("Capture complete"));
 }

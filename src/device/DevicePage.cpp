@@ -170,7 +170,7 @@ void DevicePage::onScanClicked()
 {
     if (m_connected)
     {
-        m_statusLabel->setText(tr("Disconnect the device before scanning"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Disconnect the device before scanning"));
         return;
     }
     if (m_context && m_context->discovery())
@@ -181,7 +181,7 @@ void DevicePage::onScanStarted()
 {
     m_scanButton->setEnabled(false);
     m_scanButton->setText(tr("Scanning..."));
-    m_statusLabel->setText(tr("Scanning for devices..."));
+    m_context->notifications()->status(QStringLiteral("device"), tr("Scanning for devices..."));
 }
 
 void DevicePage::onScanFinished()
@@ -213,9 +213,9 @@ void DevicePage::onDevicesChanged()
     }
 
     if (devices.isEmpty())
-        m_statusLabel->setText(tr("No devices found"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("No devices found"));
     else
-        m_statusLabel->setText(tr("Found %1 device(s)").arg(devices.size()));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Found %1 device(s)").arg(devices.size()));
 }
 
 QVector<quint8> DevicePage::selectedChannels() const
@@ -253,10 +253,10 @@ void DevicePage::wireSession(QtDeviceSessionAdapter *session)
                     m_applyPendingAcks = 0;
                     m_applyError = msg;
                     setControlsEnabled(m_connected);
-                    m_statusLabel->setText(tr("Settings failed: %1").arg(msg));
+                    m_context->notifications()->status(QStringLiteral("device"), tr("Settings failed: %1").arg(msg));
                     return;
                 }
-                m_statusLabel->setText(tr("Error: %1").arg(msg));
+                m_context->notifications()->status(QStringLiteral("device"), tr("Error: %1").arg(msg));
             });
 }
 
@@ -275,7 +275,7 @@ void DevicePage::onConnectSelected()
     QListWidgetItem *item = m_deviceList->currentItem();
     if (!item)
     {
-        m_statusLabel->setText(tr("Select a device first"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Select a device first"));
         return;
     }
 
@@ -307,11 +307,11 @@ void DevicePage::onConnectionChanged(bool connected)
             m_context->acquisition()->release(AcquisitionOwner::Monitoring);
         m_streaming = false;
         m_streamButton->setText(tr("Start streaming"));
-        m_statusLabel->setText(tr("Disconnected"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Disconnected"));
     }
     else
     {
-        m_statusLabel->setText(tr("Connected"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Connected"));
     }
     setControlsEnabled(connected);
 }
@@ -353,13 +353,13 @@ void DevicePage::applySettings()
     auto *session = m_context ? m_context->session() : nullptr;
     if (!session)
     {
-        m_statusLabel->setText(tr("Settings failed: no device connected"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Settings failed: no device connected"));
         return;
     }
     const QVector<quint8> chans = selectedChannels();
     if (chans.isEmpty())
     {
-        m_statusLabel->setText(tr("Settings failed: select at least one channel"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Settings failed: select at least one channel"));
         return;
     }
 
@@ -382,7 +382,7 @@ void DevicePage::applySettings()
     m_applyPendingAcks = m_applyChannels.size() + 2; // gains + input mode + rate
     m_applyNextCommand = 0;
     m_applyExpectedCommand = -1;
-    m_statusLabel->setText(tr("Applying settings..."));
+    m_context->notifications()->status(QStringLiteral("device"), tr("Applying settings..."));
     setControlsEnabled(m_connected);
 
     sendNextApplyCommand();
@@ -441,7 +441,7 @@ void DevicePage::sendNextApplyCommand()
         m_applyFailed = true;
         m_applyError = tr("timed out waiting for device acknowledgement");
         setControlsEnabled(m_connected);
-        m_statusLabel->setText(tr("Settings failed: %1").arg(m_applyError));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Settings failed: %1").arg(m_applyError));
     });
 }
 
@@ -461,7 +461,7 @@ void DevicePage::toggleStreaming()
         const QVector<quint8> chans = selectedChannels();
         if (chans.isEmpty())
         {
-            m_statusLabel->setText(tr("Select at least one channel"));
+            m_context->notifications()->status(QStringLiteral("device"), tr("Select at least one channel"));
             return;
         }
         // Sample rate is applied by Apply settings.  Do not send another
@@ -469,7 +469,7 @@ void DevicePage::toggleStreaming()
         // outstanding command at a time and has no command queue.
         if (m_context && m_context->acquisition() &&
             !m_context->acquisition()->request({AcquisitionOwner::Monitoring, chans})) {
-            m_statusLabel->setText(tr("Unable to start stream"));
+            m_context->notifications()->status(QStringLiteral("device"), tr("Unable to start stream"));
         }
     }
 }
@@ -489,7 +489,7 @@ void DevicePage::onCommandAck(int cmdId, bool ok, int error)
             m_applyPendingAcks = 0;
             ++m_applyGeneration;
             setControlsEnabled(m_connected);
-            m_statusLabel->setText(tr("Settings failed: %1").arg(m_applyError));
+            m_context->notifications()->status(QStringLiteral("device"), tr("Settings failed: %1").arg(m_applyError));
             return;
         }
 
@@ -500,9 +500,9 @@ void DevicePage::onCommandAck(int cmdId, bool ok, int error)
             m_applyInProgress = false;
             setControlsEnabled(m_connected);
             if (m_applyFailed)
-                m_statusLabel->setText(tr("Settings failed: %1").arg(m_applyError));
+                m_context->notifications()->status(QStringLiteral("device"), tr("Settings failed: %1").arg(m_applyError));
             else
-                m_statusLabel->setText(tr("Settings applied successfully"));
+                m_context->notifications()->status(QStringLiteral("device"), tr("Settings applied successfully"));
         }
         else if (!m_applyFailed)
         {
@@ -524,13 +524,13 @@ void DevicePage::onCommandAck(int cmdId, bool ok, int error)
     {
         m_streaming = true;
         m_streamButton->setText(tr("Stop streaming"));
-        m_statusLabel->setText(tr("Streaming"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Streaming"));
     }
     else if (cmdId == 0x02) // StopStream
     {
         m_streaming = false;
         m_streamButton->setText(tr("Start streaming"));
-        m_statusLabel->setText(tr("Idle"));
+        m_context->notifications()->status(QStringLiteral("device"), tr("Idle"));
     }
     setControlsEnabled(m_connected);
 }

@@ -2,6 +2,7 @@
 #include "ai/aimodel.h"
 #include "ai/qtaiworkeradapter.h"
 #include "navigation/AppContext.h"
+#include "settings/SettingsService.h"
 #include "notifications/Notifications.h"
 #include "ui_trainingpage.h"
 
@@ -76,11 +77,11 @@ TrainingPage::TrainingPage(AppContext *c, QWidget *p) : AiPageBase(c, "Training"
                     m_training = false;
                     setTrainingControlsEnabled(m_datasetValid);
                     m_trainingStop->setEnabled(false);
-                    m_status->setText(tr("Model saved: %1").arg(p)); });
+                    setStatus(tr("Model saved: %1").arg(p)); });
         connect(c->aiWorker(), &QtAiWorkerAdapter::errorOccurred, this, [this](const QString &e)
-                { if (m_training) { m_training = false; setTrainingControlsEnabled(m_datasetValid); m_status->setText(tr("Error: %1").arg(e)); } });
+                { if (m_training) { m_training = false; setTrainingControlsEnabled(m_datasetValid); setStatus(tr("Error: %1").arg(e)); } });
         connect(c->aiWorker(), &QtAiWorkerAdapter::finished, this, [this](bool)
-                { if (m_training) { m_training = false; setTrainingControlsEnabled(m_datasetValid); m_status->setText(tr("Training finished")); } });
+                { if (m_training) { m_training = false; setTrainingControlsEnabled(m_datasetValid); setStatus(tr("Training finished")); } });
     }
 }
 
@@ -151,10 +152,10 @@ void TrainingPage::chooseDataset()
     const QString family = m_familyCombo->currentText();
     if (m_context)
     {
-        m_context->rememberDataset(d);
+        m_context->settings()->rememberDataset(d);
         m_context->aiWorker()->describeFamily(family);
     }
-    m_status->setText(tr("Loaded: %1 (%2 channels, %3 samples)").arg(QString::fromStdString(m_spec.task.displayName)).arg(m_spec.channels.size()).arg(m_spec.windowSamples));
+    setStatus(tr("Loaded: %1 (%2 channels, %3 samples)").arg(QString::fromStdString(m_spec.task.displayName)).arg(m_spec.channels.size()).arg(m_spec.windowSamples));
 }
 void TrainingPage::chooseOutput()
 {
@@ -251,13 +252,13 @@ void TrainingPage::onFamilyMeta(const QJsonObject &meta)
         return;
     m_familyMeta = meta;
     rebuildHyperparameters(meta);
-    m_status->setText(tr("Family ready: %1").arg(meta.value(QStringLiteral("name")).toString()));
+    setStatus(tr("Family ready: %1").arg(meta.value(QStringLiteral("name")).toString()));
 }
 void TrainingPage::train()
 {
     if (!m_context || m_dataset->text().isEmpty() || !m_datasetValid)
     {
-        m_status->setText(tr("Select a dataset first"));
+        setStatus(tr("Select a dataset first"));
         return;
     }
     if (m_spec.windowSamples == 0)
@@ -266,7 +267,7 @@ void TrainingPage::train()
         auto dataset = Dataset::open(m_dataset->text().toStdString(), &err);
         if (!dataset)
         {
-            m_status->setText(QString::fromStdString(err));
+            setStatus(QString::fromStdString(err));
             return;
         }
         m_spec = dataset->spec();
@@ -274,7 +275,7 @@ void TrainingPage::train()
     const QString taskType = QString::fromStdString(toString(m_spec.task.taskType)), targetType = QString::fromStdString(toString(m_spec.task.targetType));
     if (!m_familyMeta.isEmpty() && (m_familyMeta.value(QStringLiteral("task_type")).toString() != taskType || m_familyMeta.value(QStringLiteral("target_type")).toString() != targetType))
     {
-        m_status->setText(tr("Model family is incompatible with this dataset"));
+        setStatus(tr("Model family is incompatible with this dataset"));
         return;
     }
     // The selected family is a property of the model bundle, not of the
@@ -288,7 +289,7 @@ void TrainingPage::train()
     setTrainingControlsEnabled(false);
     m_spec.extra["output_kind"] = m_familyMeta.value(QStringLiteral("output")).toObject().value(QStringLiteral("kind")).toString().toStdString();
     m_context->aiWorker()->startTrainingConfig(m_dataset->text(), out, m_familyCombo->currentText(), trainingConfig());
-    m_status->setText(tr("Training started"));
+    setStatus(tr("Training started"));
 }
 void TrainingPage::stop()
 {
@@ -296,7 +297,7 @@ void TrainingPage::stop()
         m_context->aiWorker()->stop();
     m_training = false;
     setTrainingControlsEnabled(m_datasetValid);
-    m_status->setText(tr("Training stopped"));
+    setStatus(tr("Training stopped"));
 }
 void TrainingPage::onMetric(int epoch, int epochs, double tl, double vl, double acc)
 {

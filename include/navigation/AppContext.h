@@ -3,7 +3,6 @@
 
 #include <QObject>
 #include <memory>
-#include <QStringList>
 
 class QtDeviceDiscoveryAdapter;
 class QtDeviceSessionAdapter;
@@ -12,6 +11,7 @@ class DataHub;
 class AcquisitionService;
 class ThemeManager;
 class Notifications;
+class SettingsService;
 
 // Shared application state passed to the pages.
 //
@@ -33,10 +33,7 @@ public:
     AcquisitionService *acquisition() const { return m_acquisition; }
     ThemeManager *themeManager() const { return m_themeManager; }
     Notifications *notifications() const { return m_notifications; }
-    const QStringList &recentDatasets() const { return m_recentDatasets; }
-    const QStringList &recentModels() const { return m_recentModels; }
-    void rememberDataset(const QString &path);
-    void rememberModel(const QString &path);
+    SettingsService *settings() const { return m_settings; }
 
     // Replace the current session adapter. Takes ownership. The previous
     // session is deleted after emitting sessionChanged().
@@ -53,8 +50,7 @@ private:
     AcquisitionService *m_acquisition = nullptr;
     ThemeManager *m_themeManager = nullptr;
     Notifications *m_notifications = nullptr;
-    QStringList m_recentDatasets;
-    QStringList m_recentModels;
+    SettingsService *m_settings = nullptr;
 };
 
 #endif // APPCONTEXT_H

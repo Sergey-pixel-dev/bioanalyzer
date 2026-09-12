@@ -4,6 +4,7 @@
 #include "device/acquisitionservice.h"
 #include "device/qtdevicesessionadapter.h"
 #include "navigation/AppContext.h"
+#include "settings/SettingsService.h"
 #include "notifications/Notifications.h"
 #include "ui_inferencepage.h"
 
@@ -61,11 +62,11 @@ InferencePage::InferencePage(AppContext *c, QWidget *p) : AiPageBase(c, "Inferen
         connect(c->aiWorker(), &QtAiWorkerAdapter::started, this, [this]
                 {
                     if (m_running)
-                        m_status->setText(tr("Inference worker ready; collecting data")); });
+                        setStatus(tr("Inference worker ready; collecting data")); });
         connect(c->aiWorker(), &QtAiWorkerAdapter::errorOccurred, this, [this](const QString &message)
                 {
                     if (m_running)
-                        m_status->setText(tr("Inference error: %1").arg(message)); });
+                        setStatus(tr("Inference error: %1").arg(message)); });
         connect(c->aiWorker(), &QtAiWorkerAdapter::finished, this, [this](bool ok)
                 {
                     if (m_running)
@@ -79,7 +80,7 @@ InferencePage::InferencePage(AppContext *c, QWidget *p) : AiPageBase(c, "Inferen
                         m_stop->setEnabled(false);
                         m_modelBrowse->setEnabled(true);
                         m_inferenceStride->setEnabled(m_modelLoaded);
-                        m_status->setText(ok ? tr("Inference worker stopped")
+                        setStatus(ok ? tr("Inference worker stopped")
                                              : tr("Inference worker exited with an error"));
                     } });
         connect(c->aiWorker(), &QtAiWorkerAdapter::inferenceOutput, this, [this](const QJsonObject &out)
@@ -121,7 +122,7 @@ InferencePage::InferencePage(AppContext *c, QWidget *p) : AiPageBase(c, "Inferen
                                                                         : QString()));
                         }
                     }
-                    m_status->setText(tr("Inference result received (%1 window%2)")
+                    setStatus(tr("Inference result received (%1 window%2)")
                                           .arg(m_windowsSent)
                                           .arg(m_windowsSent == 1 ? QString() : QStringLiteral("s"))); });
         connect(c->acquisition(), &AcquisitionService::samplesReady,
@@ -132,7 +133,7 @@ void InferencePage::chooseModel()
 {
     if (m_running)
     {
-        m_status->setText(tr("Stop inference before changing the model"));
+        setStatus(tr("Stop inference before changing the model"));
         return;
     }
     auto d = QFileDialog::getExistingDirectory(this, tr("Select model bundle"), m_model->text());
@@ -153,7 +154,7 @@ void InferencePage::chooseModel()
         m_inferenceStride->setValue(static_cast<int>(std::min<std::size_t>(m_spec.windowSamples, 100000000)));
     }
     if (m_context)
-        m_context->rememberModel(d);
+        m_context->settings()->rememberModel(d);
     m_inferenceStride->setEnabled(true);
     m_model->setReadOnly(true);
     m_descriptor->setText(tr("Task: %1  |  Family: %2  |  Window: %3 samples").arg(QString::fromStdString(info.taskId)).arg(QString::fromStdString(info.modelFamily)).arg(m_spec.windowSamples));
@@ -162,24 +163,24 @@ void InferencePage::start()
 {
     if (m_running)
     {
-        m_status->setText(tr("Inference is already running"));
+        setStatus(tr("Inference is already running"));
         return;
     }
     if (!m_context || m_model->text().isEmpty() || !m_modelLoaded)
     {
-        m_status->setText(tr("Select a model first"));
+        setStatus(tr("Select a model first"));
         return;
     }
     if (m_context->aiWorker()->isRunning())
     {
-        m_status->setText(tr("AI worker is busy with another operation"));
+        setStatus(tr("AI worker is busy with another operation"));
         return;
     }
     ModelBundleInfo info;
     std::string err;
     if (!loadModelManifest(m_model->text().toStdString(), info, m_spec, &err))
     {
-        m_status->setText(QString::fromStdString(err));
+        setStatus(QString::fromStdString(err));
         return;
     }
     QVector<quint8> channels;
@@ -196,7 +197,7 @@ void InferencePage::start()
                               : QVector<quint8>());
         if (channels.isEmpty())
         {
-            m_status->setText(tr("Select channels and start streaming on the Devices page first"));
+            setStatus(tr("Select channels and start streaming on the Devices page first"));
             return;
         }
         DatasetSpec live = m_spec;
@@ -207,7 +208,7 @@ void InferencePage::start()
         std::string reason;
         if (!modelCompatible(m_spec, live, &reason))
         {
-            m_status->setText(tr("Model is incompatible with device: %1").arg(QString::fromStdString(reason)));
+            setStatus(tr("Model is incompatible with device: %1").arg(QString::fromStdString(reason)));
             return;
         }
     }
@@ -217,13 +218,13 @@ void InferencePage::start()
     }
     if (channels.isEmpty())
     {
-        m_status->setText(tr("No active channels are available"));
+        setStatus(tr("No active channels are available"));
         return;
     }
     auto *acquisition = m_context->acquisition();
     if (!acquisition)
     {
-        m_status->setText(tr("Acquisition service is unavailable"));
+        setStatus(tr("Acquisition service is unavailable"));
         return;
     }
     m_acquisitionRequested = false;
@@ -234,18 +235,18 @@ void InferencePage::start()
         // stream instead of attempting to start a second one.
         if (acquisition->activeChannels() != channels)
         {
-            m_status->setText(tr("The running stream uses a different channel selection"));
+            setStatus(tr("The running stream uses a different channel selection"));
             return;
         }
         if (acquisition->isOwner(AcquisitionOwner::DatasetCapture))
         {
-            m_status->setText(tr("Device is busy with data collection"));
+            setStatus(tr("Device is busy with data collection"));
             return;
         }
     }
     else if (!acquisition->request({AcquisitionOwner::Inference, channels}))
     {
-        m_status->setText(tr("Unable to start device stream"));
+        setStatus(tr("Unable to start device stream"));
         return;
     }
     else
@@ -258,7 +259,7 @@ void InferencePage::start()
         if (m_acquisitionRequested && m_context->acquisition())
             m_context->acquisition()->release(AcquisitionOwner::Inference);
         m_acquisitionRequested = false;
-        m_status->setText(tr("The model has an invalid inference window"));
+        setStatus(tr("The model has an invalid inference window"));
         return;
     }
     try
@@ -271,7 +272,7 @@ void InferencePage::start()
         if (m_acquisitionRequested && m_context->acquisition())
             m_context->acquisition()->release(AcquisitionOwner::Inference);
         m_acquisitionRequested = false;
-        m_status->setText(tr("Inference setup error: %1").arg(QString::fromUtf8(e.what())));
+        setStatus(tr("Inference setup error: %1").arg(QString::fromUtf8(e.what())));
         return;
     }
     m_seen = 0;
@@ -283,7 +284,7 @@ void InferencePage::start()
     m_modelBrowse->setEnabled(false);
     m_inferenceStride->setEnabled(false);
     m_context->aiWorker()->startInference(m_model->text(), QString::fromStdString(info.modelFamily));
-    m_status->setText(tr("Inference started; waiting for a %1-sample window (stride %2)")
+    setStatus(tr("Inference started; waiting for a %1-sample window (stride %2)")
                           .arg(m_spec.windowSamples)
                           .arg(stride));
 }
@@ -302,7 +303,7 @@ void InferencePage::stop()
     m_stop->setEnabled(false);
     m_modelBrowse->setEnabled(true);
     m_inferenceStride->setEnabled(m_modelLoaded);
-    m_status->setText(tr("Inference stopped"));
+    setStatus(tr("Inference stopped"));
 }
 void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
 {
@@ -310,7 +311,7 @@ void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
         return;
     if (b.samples.size() != m_spec.channels.size())
     {
-        m_status->setText(tr("Inference error: received %1 channels, model expects %2")
+        setStatus(tr("Inference error: received %1 channels, model expects %2")
                               .arg(b.samples.size())
                               .arg(m_spec.channels.size()));
         return;
@@ -320,7 +321,7 @@ void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
     {
         if (channel.size() != sampleCount)
         {
-            m_status->setText(tr("Inference error: inconsistent sample block"));
+            setStatus(tr("Inference error: inconsistent sample block"));
             return;
         }
     }
@@ -337,7 +338,7 @@ void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
     }
     catch (const std::exception &e)
     {
-        m_status->setText(tr("Inference error: %1").arg(QString::fromUtf8(e.what())));
+        setStatus(tr("Inference error: %1").arg(QString::fromUtf8(e.what())));
         return;
     }
     const int rows = static_cast<int>(m_spec.windowSamples);
@@ -358,15 +359,15 @@ void InferencePage::onBlock(const QtDeviceSessionAdapter::SampleBlock &b)
     if (m_running && windows.empty())
     {
         if (m_windowAccumulator.skippedSamples() > 0)
-            m_status->setText(tr("Waiting for next inference window: %1 samples")
+            setStatus(tr("Waiting for next inference window: %1 samples")
                                   .arg(m_windowAccumulator.skippedSamples()));
         else
-            m_status->setText(tr("Collecting inference window: %1 / %2 samples")
+            setStatus(tr("Collecting inference window: %1 / %2 samples")
                                   .arg(m_seen)
                                   .arg(m_spec.windowSamples));
     }
     else if (m_running && !windows.empty())
-        m_status->setText(tr("Inference windows queued: %1; results received: %2")
+        setStatus(tr("Inference windows queued: %1; results received: %2")
                               .arg(m_windowsSent)
                               .arg(m_resultsReceived));
 }
@@ -375,14 +376,14 @@ void InferencePage::onStrideChanged(int samples)
 {
     if (m_running)
     {
-        m_status->setText(tr("Stop inference before changing the stride"));
+        setStatus(tr("Stop inference before changing the stride"));
         return;
     }
     if (samples <= 0 || m_spec.windowSamples == 0 || !m_modelLoaded)
         return;
     if (m_windowAccumulator.channels() == 0)
     {
-        m_status->setText(tr("Inference stride will be used when inference starts"));
+        setStatus(tr("Inference stride will be used when inference starts"));
         return;
     }
     try
@@ -390,10 +391,10 @@ void InferencePage::onStrideChanged(int samples)
         m_windowAccumulator.configure(m_windowAccumulator.channels(), m_spec.windowSamples,
                                       static_cast<std::size_t>(samples));
         m_seen = 0;
-        m_status->setText(tr("Inference stride changed to %1 samples; buffer reset").arg(samples));
+        setStatus(tr("Inference stride changed to %1 samples; buffer reset").arg(samples));
     }
     catch (const std::exception &e)
     {
-        m_status->setText(tr("Inference stride error: %1").arg(QString::fromUtf8(e.what())));
+        setStatus(tr("Inference stride error: %1").arg(QString::fromUtf8(e.what())));
     }
 }

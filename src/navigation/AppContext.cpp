@@ -6,6 +6,7 @@
 #include "datahub/datahub.h"
 #include "device/acquisitionservice.h"
 #include "notifications/Notifications.h"
+#include "settings/SettingsService.h"
 #include "settings/thememanager.h"
 #include <QApplication>
 #include <QCoreApplication>
@@ -22,8 +23,7 @@ AppContext::AppContext(QObject *parent)
     m_aiWorker = new QtAiWorkerAdapter(this);
     m_acquisition = new AcquisitionService(this, this);
     m_notifications = new Notifications(this);
-    m_recentDatasets = QSettings().value("ai/recentDatasets").toStringList();
-    m_recentModels = QSettings().value("ai/recentModels").toStringList();
+    m_settings = new SettingsService(this);
 }
 
 AppContext::~AppContext()
@@ -42,28 +42,6 @@ AppContext::~AppContext()
     m_discovery = nullptr;
     delete m_dataHub;
     m_dataHub = nullptr;
-}
-
-void AppContext::rememberDataset(const QString &path)
-{
-    if (path.isEmpty())
-        return;
-    m_recentDatasets.removeAll(path);
-    m_recentDatasets.prepend(path);
-    while (m_recentDatasets.size() > 10)
-        m_recentDatasets.removeLast();
-    QSettings().setValue("ai/recentDatasets", m_recentDatasets);
-}
-
-void AppContext::rememberModel(const QString &path)
-{
-    if (path.isEmpty())
-        return;
-    m_recentModels.removeAll(path);
-    m_recentModels.prepend(path);
-    while (m_recentModels.size() > 10)
-        m_recentModels.removeLast();
-    QSettings().setValue("ai/recentModels", m_recentModels);
 }
 
 void AppContext::setSession(QtDeviceSessionAdapter *session)
