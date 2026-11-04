@@ -10,16 +10,56 @@
      <item row="0" column="1"><layout class="QHBoxLayout" name="datasetLayout"><item><widget class="QLineEdit" name="datasetPath"><property name="readOnly"><bool>true</bool></property></widget></item><item><widget class="QPushButton" name="datasetBrowse"><property name="text"><string>Browse...</string></property></widget></item></layout></item>
      <item row="1" column="0"><widget class="QLabel" name="familyLabel"><property name="text"><string>Model family:</string></property></widget></item>
      <item row="1" column="1"><widget class="QComboBox" name="familyCombo"/></item>
-     <item row="2" column="0"><widget class="QLabel" name="outputLabel"><property name="text"><string>Output parent folder:</string></property></widget></item>
-     <item row="2" column="1"><layout class="QHBoxLayout" name="outputLayout"><item><widget class="QLineEdit" name="outputPath"/></item><item><widget class="QPushButton" name="outputBrowse"><property name="text"><string>Browse...</string></property></widget></item></layout></item>
+     <item row="2" column="0"><widget class="QLabel" name="outputLabel"><property name="text"><string>Model folder:</string></property></widget></item>
+     <item row="2" column="1"><layout class="QHBoxLayout" name="outputLayout"><item><widget class="QLineEdit" name="outputPath"><property name="toolTip"><string>A folder with a trained model continues its training; any other folder receives a new model</string></property></widget></item><item><widget class="QPushButton" name="outputBrowse"><property name="text"><string>Browse...</string></property></widget></item></layout></item>
     </layout>
    </item>
-   <item><widget class="QWidget" name="hyperparameters"><layout class="QFormLayout" name="hyperparameterForm"/></widget></item>
-   <item><widget class="QProgressBar" name="progress"><property name="value"><number>0</number></property></widget></item>
-   <item><widget class="QTableWidget" name="metrics"><property name="columnCount"><number>5</number></property><property name="rowCount"><number>0</number></property><column><property name="text"><string>Epoch</string></property></column><column><property name="text"><string>Train loss</string></property></column><column><property name="text"><string>Validation loss</string></property></column><column><property name="text"><string>Metric</string></property></column><column><property name="text"><string>Progress</string></property></column></widget></item>
+   <item>
+    <widget class="QSplitter" name="splitter">
+     <property name="orientation"><enum>Qt::Vertical</enum></property>
+     <property name="childrenCollapsible"><bool>false</bool></property>
+     <widget class="QScrollArea" name="hyperparameterScroll">
+      <property name="widgetResizable"><bool>true</bool></property>
+      <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarAlwaysOff</enum></property>
+      <widget class="QWidget" name="hyperparameters">
+       <layout class="QFormLayout" name="hyperparameterForm"/>
+      </widget>
+     </widget>
+     <widget class="QSplitter" name="resultsSplitter">
+      <property name="orientation"><enum>Qt::Horizontal</enum></property>
+      <property name="childrenCollapsible"><bool>false</bool></property>
+      <widget class="QTableWidget" name="metrics"/>
+      <widget class="QWidget" name="plotPanel">
+       <layout class="QHBoxLayout" name="plotLayout" stretch="1,0">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item><widget class="QCustomPlot" name="lossPlot"><property name="minimumSize"><size><width>320</width><height>180</height></size></property><property name="toolTip"><string>Wheel and a frame drawn with the left button zoom in; the middle button fits the curves again</string></property></widget></item>
+        <item>
+         <widget class="QGroupBox" name="axesBox">
+          <property name="sizePolicy"><sizepolicy hsizetype="Maximum" vsizetype="Preferred"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
+          <property name="title"><string>Axes</string></property>
+          <property name="toolTip"><string>The axis each value is drawn on: values of one scale, such as the losses, share an axis</string></property>
+          <layout class="QFormLayout" name="axesForm"/>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </widget>
+   </item>
    <item><layout class="QHBoxLayout" name="buttonsLayout"><item><widget class="QPushButton" name="startButton"><property name="text"><string>Start training</string></property></widget></item><item><widget class="QPushButton" name="stopButton"><property name="text"><string>Stop</string></property></widget></item></layout></item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>QCustomPlot</class>
+   <extends>QWidget</extends>
+   <header>qcustomplot.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

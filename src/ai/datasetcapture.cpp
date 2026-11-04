@@ -1,152 +1,209 @@
 #include "ai/datasetcapture.h"
+#include "common/translatable.h"
 
 #include <algorithm>
+#include <ctime>
+#include <exception>
 
 DatasetCaptureEngine::DatasetCaptureEngine(DataHub *hub)
     : m_hub(hub) {}
 
-DatasetCaptureEngine::~DatasetCaptureEngine() { stop(); }
+DatasetCaptureEngine::~DatasetCaptureEngine()
+{
+    // Stop receiving and keep what was captured; finish() makes no callbacks.
+    finish(true);
+}
 
 bool DatasetCaptureEngine::start(const std::string &directory, const DatasetSpec &spec,
-                                 const std::vector<std::string> &labels,
-                                 int repetitions)
+                                 const std::vector<std::string> &labels, bool append,
+                                 std::string *error)
 {
-    if (!m_hub || spec.task.taskType != TaskType::Classification ||
-        spec.task.targetType != TargetType::Label ||
-        spec.task.paradigm.kind != ParadigmSpec::Kind::CueSchedule ||
-        labels.empty() || spec.channels.empty() || spec.sampleRate == 0 ||
-        spec.windowSamples == 0 || repetitions < 1)
+    auto fail = [&](const char *reason)
+    {
+        if (error)
+            *error = reason;
         return false;
-    m_spec = spec;
-    m_spec.task.paradigm.prepSeconds = std::max(0, m_spec.task.paradigm.prepSeconds);
-    m_spec.task.paradigm.recordSeconds = std::max(1, m_spec.task.paradigm.recordSeconds);
-    std::string error;
-    auto dataset = Dataset::create(directory, m_spec, &error);
+    };
+    if (m_running || !m_hub)
+        return fail(QT_TRANSLATE_NOOP("Errors", "capture is already running"));
+    if (!isSupportedTask(spec.task))
+        return fail(QT_TRANSLATE_NOOP("Errors", "only classification by a cue schedule can be captured"));
+    if (labels.empty())
+        return fail(QT_TRANSLATE_NOOP("Errors", "the schedule is empty"));
+    if (spec.channels.empty() || spec.sampleRate == 0 || spec.windowSamples == 0)
+        return fail(QT_TRANSLATE_NOOP("Errors", "the stream parameters are not set"));
+    DatasetSpec normalized = spec;
+    normalized.task.paradigm.prepSeconds = std::max(0, normalized.task.paradigm.prepSeconds);
+    normalized.task.paradigm.recordSeconds = std::max(1, normalized.task.paradigm.recordSeconds);
+    // One window per trial: the stride equals the window.
+    normalized.strideSamples = normalized.windowSamples;
+    try
+    {
+        m_accumulator.configure(normalized.channels.size(), normalized.windowSamples,
+                                normalized.windowSamples);
+    }
+    catch (const std::exception &exception)
+    {
+        if (error)
+            *error = exception.what();
+        return false;
+    }
+    auto dataset = append ? Dataset::openForAppend(directory, normalized, error)
+                          : Dataset::create(directory, normalized, error);
     if (!dataset)
         return false;
+
+    m_spec = normalized;
     m_dataset = std::move(dataset);
     m_labels = labels;
-    m_repetitions = repetitions;
-    m_prep = m_spec.task.paradigm.prepSeconds;
-    m_duration = m_spec.task.paradigm.recordSeconds;
-    m_seen = 0;
+    m_examples = 0;
+    m_cycle = -1;
+    m_recording = false;
+    m_windowDone = false;
+    m_pendingPhases.clear();
+    m_queue.clear();
+    m_pending = {};
     m_running = true;
-    m_history.assign(spec.channels.size(), {});
-    m_token = m_hub->subscribe([this](const DataHub::Block &block)
-                               { onBlock(block); });
+    // Subscribe last: everything a block needs is already in place.
+    m_token = m_hub->subscribe([this](const DataHub::Block &block) { onBlock(block); });
     return true;
 }
 
-void DatasetCaptureEngine::stop()
+void DatasetCaptureEngine::setPhase(int cycle, bool recording)
 {
-    if (m_token && m_hub)
+    if (!m_running)
+        return;
+    m_queue.post([this, cycle, recording] { applyPhase(cycle, recording); });
+}
+
+void DatasetCaptureEngine::applyPhase(int cycle, bool recording)
+{
+    if (cycle < 0 || static_cast<size_t>(cycle) >= m_labels.size())
+        return;
+    // The trial's window is not complete yet: finish it first.
+    if (m_recording && !m_windowDone)
+    {
+        m_pendingPhases.emplace_back(cycle, recording);
+        return;
+    }
+    m_accumulator.reset();
+    m_windowDone = false;
+    m_cycle = cycle;
+    m_recording = recording;
+}
+
+void DatasetCaptureEngine::unsubscribe()
+{
+    if (m_hub && m_token)
         m_hub->unsubscribe(m_token);
     m_token = 0;
+}
+
+void DatasetCaptureEngine::finish(bool stopped)
+{
+    if (!m_running)
+        return;
+    // Unsubscribing waits for a block in progress; afterwards nothing else
+    // touches the dataset.
+    unsubscribe();
+    m_queue.clear();
+    m_pendingPhases.clear();
+    if (m_dataset)
+        m_dataset->finish(stopped ? "stopped" : "complete", m_pending);
+    m_pending = {};
+    m_dataset.reset();
+    m_accumulator.reset();
+    m_running = false;
+}
+
+void DatasetCaptureEngine::markRepeated(uint64_t id)
+{
     if (m_running)
-    {
-        if (m_dataset)
-            m_dataset->finish("stopped");
-        m_dataset.reset();
-        m_running = false;
-        m_history.clear();
-        if (m_completed)
-            m_completed(true);
-    }
+        m_pending.repeated.insert(id);
+}
+
+void DatasetCaptureEngine::appendLabel(const std::string &label)
+{
+    if (!m_running)
+        return;
+    // The schedule is read by the receiving thread: it grows between blocks,
+    // before the cue timer reaches the new trial.
+    m_queue.post([this, label] { m_labels.push_back(label); });
 }
 
 void DatasetCaptureEngine::onBlock(const DataHub::Block &block)
 {
-    if (!m_running || block.channels.size() != m_spec.channels.size() ||
-        block.samples.size() != m_spec.channels.size())
+    // Phase changes posted by the cue timer take effect between blocks.
+    m_queue.drain();
+
+    // The specification took the channels from the device session, and they
+    // cannot change while the stream runs: capture ends when the stream stops.
+    if (block.samples.size() != m_spec.channels.size())
         return;
-    for (size_t c = 0; c < m_spec.channels.size(); ++c)
-        if (block.channels[c] != m_spec.channels[c])
+    const size_t count = block.samples.empty() ? 0 : block.samples.front().size();
+    for (const auto &channel : block.samples)
+        if (channel.size() != count)
             return;
 
-    const uint64_t prep = uint64_t(m_prep) * m_spec.sampleRate;
-    const uint64_t duration = uint64_t(m_duration) * m_spec.sampleRate;
-    const uint64_t cycle = prep + duration;
-    const uint64_t totalCycles = uint64_t(m_labels.size()) * uint64_t(m_repetitions);
-    const size_t window = m_spec.windowSamples;
-    const size_t stride = m_spec.strideSamples ? m_spec.strideSamples : window;
-    const size_t count = block.samples.empty() ? 0 : block.samples.front().size();
+    // Preparation, or the rest of a trial whose window is already written.
+    if (!m_recording || m_cycle < 0 || m_windowDone)
+        return;
 
-    for (size_t i = 0; i < count && m_running; ++i)
+    std::vector<float> sampleMajor;
+    sampleMajor.reserve(count * block.samples.size());
+    for (size_t i = 0; i < count; ++i)
+        for (const auto &channel : block.samples)
+            sampleMajor.push_back(static_cast<float>(channel[i]));
+
+    std::vector<SlidingWindowAccumulator::Window> windows;
+    try
     {
-        const uint64_t absolute = m_seen++;
-        const uint64_t cycleNo = cycle ? absolute / cycle : 0;
-        if (cycleNo >= totalCycles)
-        {
-            if (m_dataset)
-                m_dataset->finish("complete");
-            m_dataset.reset();
-            m_running = false;
-            m_history.clear();
-            if (m_completed)
-                m_completed(false);
-            break;
-        }
-        const uint64_t inCycle = cycle ? absolute % cycle : 0;
-        if (inCycle < prep)
-        {
-            for (auto &history : m_history)
-                history.clear();
-            if (inCycle == 0)
-            {
-                const size_t labelIndex = static_cast<size_t>(cycleNo % m_labels.size());
-                const int repetition = static_cast<int>(cycleNo / m_labels.size());
-                TargetValue eventTarget;
-                eventTarget.type = TargetType::Label;
-                eventTarget.label = m_labels[labelIndex];
-                if (m_dataset)
-                    m_dataset->appendEvent(absolute, m_labels[labelIndex], eventTarget);
-                if (m_progress)
-                    m_progress(static_cast<int>(labelIndex), repetition, 0.0,
-                               m_labels[labelIndex]);
-            }
-            continue;
-        }
-        const uint64_t recorded = inCycle - prep;
-        for (size_t c = 0; c < m_history.size(); ++c)
-        {
-            if (i >= block.samples[c].size())
-                continue;
-            auto &history = m_history[c];
-            history.push_back(block.samples[c][i]);
-            while (history.size() > window)
-                history.pop_front();
-        }
-        if (recorded + 1 < window || ((recorded + 1 - window) % stride) != 0)
-            continue;
+        windows = m_accumulator.append(sampleMajor, count);
+    }
+    catch (const std::exception &)
+    {
+        return;
+    }
+    if (windows.empty())
+        return;
 
-        std::vector<std::vector<int32_t>> example(m_history.size());
-        bool complete = true;
-        for (size_t c = 0; c < m_history.size(); ++c)
-        {
-            if (m_history[c].size() != window)
-            {
-                complete = false;
-                break;
-            }
-            example[c].assign(m_history[c].begin(), m_history[c].end());
-        }
-        if (!complete)
-            continue;
-        const size_t labelIndex = static_cast<size_t>(cycleNo % m_labels.size());
-        const int repetition = static_cast<int>(cycleNo / m_labels.size());
-        // `absolute` is the sample position in the capture timeline; unlike
-        // the index within this push block it cannot underflow when a window
-        // spans two or more blocks.
-        ExampleRecord record;
-        record.sourceSample = absolute + 1 - window;
-        record.target.type = TargetType::Label;
-        record.target.label = m_labels[labelIndex];
-        record.samples = std::move(example);
-        if (m_dataset)
-            m_dataset->append(record);
-        if (m_progress)
-            m_progress(static_cast<int>(labelIndex), repetition,
-                       double(recorded + 1) / double(m_spec.sampleRate),
-                       m_labels[labelIndex]);
+    writeWindow(windows.front());
+    m_windowDone = true;
+    if (m_progress)
+        m_progress(m_cycle, m_examples);
+    // Phase changes that waited for this window take effect now, in order.
+    std::deque<std::pair<int, bool>> pending;
+    pending.swap(m_pendingPhases);
+    for (const auto &phase : pending)
+        applyPhase(phase.first, phase.second);
+}
+
+void DatasetCaptureEngine::writeWindow(const SlidingWindowAccumulator::Window &window)
+{
+    const size_t channels = m_spec.channels.size();
+    ExampleRecord record;
+    record.target.type = TargetType::Label;
+    record.target.label = m_labels[static_cast<size_t>(m_cycle)];
+    record.cue = record.target;
+    char stamp[32] = {};
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    std::strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S", &local);
+    record.recordedAt = stamp;
+    // The accumulator is sample-major; the dataset stores [channel][sample].
+    record.samples.assign(channels, std::vector<int32_t>(m_spec.windowSamples));
+    for (size_t s = 0; s < m_spec.windowSamples; ++s)
+        for (size_t c = 0; c < channels; ++c)
+            record.samples[c][s] = static_cast<int32_t>(window[s * channels + c]);
+    if (m_dataset && m_dataset->append(record))
+    {
+        ++m_examples;
+        if (m_example)
+            m_example(m_cycle, m_dataset->exampleCount() - 1, record);
     }
 }

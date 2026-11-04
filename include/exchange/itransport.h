@@ -2,6 +2,7 @@
 #define ITRANSPORT_H
 
 #include <cstdint>
+#include <string>
 
 // Low-level byte transport abstraction.
 //
@@ -32,6 +33,9 @@ public:
 
     // True while the endpoint is usable.
     virtual bool isOpen() const = 0;
+
+    // Why the last open() failed, in English; empty if it did not.
+    virtual std::string lastError() const { return {}; }
 };
 
 #endif // ITRANSPORT_H

@@ -1,13 +1,17 @@
 #include "navigation/MainWindow.h"
 #include "ui_mainwindow.h"
 #include "navigation/MainWindowPresentationModel.h"
-#include "monitoring/MonitoringPage.h"
-#include "device/DevicePage.h"
+#include "navigation/MonitoringPage.h"
+#include "navigation/DevicePage.h"
+#include "navigation/PlaybackBar.h"
+#include "notifications/Notifications.h"
+#include "device/qtdevicesessionadapter.h"
 #include "navigation/AppContext.h"
-#include "ai/DataCollectionPage.h"
-#include "ai/TrainingPage.h"
-#include "ai/InferencePage.h"
-#include "settings/SettingsPage.h"
+#include "navigation/DataCollectionPage.h"
+#include "navigation/DatasetPage.h"
+#include "navigation/TrainingPage.h"
+#include "navigation/InferencePage.h"
+#include "navigation/SettingsPage.h"
 #include <QSplitter>
 #include <QTreeWidget>
 #include <QSettings>
@@ -30,6 +34,9 @@ MainWindow::MainWindow(QWidget *parent)
     contentLayout->setContentsMargins(0, 0, 0, 0);
     contentLayout->addWidget(ui->toolButtonVisibility, 0, Qt::AlignLeft);
     contentLayout->addWidget(ui->stackedWidget, 1);
+    // The playback bar lies under every page but not under the menu.
+    auto *playbackBar = new PlaybackBar(m_context, content);
+    contentLayout->addWidget(playbackBar);
     m_splitter->addWidget(nav);
     m_splitter->addWidget(content);
     m_splitter->setStretchFactor(1, 1);
@@ -42,6 +49,10 @@ MainWindow::MainWindow(QWidget *parent)
     m_aiItem->setData(0, Qt::UserRole, -1);
     auto *collect = new QTreeWidgetItem(m_aiItem, {tr("Data Collection")});
     collect->setData(0, Qt::UserRole, 2);
+    // Index 6: the pages added later get new indices, so a saved current
+    // page keeps pointing to the same page.
+    auto *datasets = new QTreeWidgetItem(m_aiItem, {tr("Datasets")});
+    datasets->setData(0, Qt::UserRole, 6);
     auto *training = new QTreeWidgetItem(m_aiItem, {tr("Training")});
     training->setData(0, Qt::UserRole, 3);
     auto *inference = new QTreeWidgetItem(m_aiItem, {tr("Inference")});
@@ -64,12 +75,14 @@ MainWindow::MainWindow(QWidget *parent)
     TrainingPage *trainingPage = new TrainingPage(m_context, this);
     InferencePage *inferencePage = new InferencePage(m_context, this);
     SettingsPage *settingsPage = new SettingsPage(m_context, this);
+    DatasetPage *datasetPage = new DatasetPage(m_context, this);
     ui->stackedWidget->insertWidget(0, monitoringPage);
     ui->stackedWidget->insertWidget(1, devicePage);
     ui->stackedWidget->insertWidget(2, dataPage);
     ui->stackedWidget->insertWidget(3, trainingPage);
     ui->stackedWidget->insertWidget(4, inferencePage);
     ui->stackedWidget->insertWidget(5, settingsPage);
+    ui->stackedWidget->insertWidget(6, datasetPage);
 
     connect(ui->toolButtonVisibility, &QToolButton::clicked,
             m_pm, &MainWindowPresentationModel::toggleMainMenu);
@@ -80,14 +93,42 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::applyAiExpanded);
     connect(m_pm, &MainWindowPresentationModel::currentPageChanged,
             this, &MainWindow::applyCurrentPage);
+    // The collapsed state of the playback bar is navigation state: the model
+    // keeps and persists it, the bar only shows it.
+    connect(m_pm, &MainWindowPresentationModel::playbackBarExpandedChanged,
+            playbackBar, &PlaybackBar::setExpanded);
+    connect(playbackBar, &PlaybackBar::expandedChanged,
+            m_pm, &MainWindowPresentationModel::setPlaybackBarExpanded);
 
     QSettings persistedSettings;
     m_pm->restore(persistedSettings);
     applyMainMenuVisible(m_pm->isMainMenuVisible());
     applyAiExpanded(m_pm->isAiExpanded());
+    playbackBar->setExpanded(m_pm->isPlaybackBarExpanded());
     applyCurrentPage(m_pm->currentPage());
     if (!m_pm->splitterState().isEmpty())
         m_splitter->restoreState(m_pm->splitterState());
+
+    connect(m_context, &AppContext::sessionChanged, this, &MainWindow::watchSession);
+    watchSession(m_context->session());
+}
+
+void MainWindow::watchSession(QtDeviceSessionAdapter *session)
+{
+    if (m_watchedSession)
+        disconnect(m_watchedSession, nullptr, this, nullptr);
+    m_watchedSession = session;
+    if (!session)
+        return;
+    connect(session, &QtDeviceSessionAdapter::errorOccurred, this, [this](const QString &message)
+            { m_context->notifications()->error(this, tr("Device"), message); });
+    connect(session, &QtDeviceSessionAdapter::connectionLost, this, [this](const QString &reason)
+            { m_context->notifications()->error(
+                  this, tr("Device"),
+                  tr("The connection to the device is lost: %1.\n"
+                     "The device is disconnected and the stream is stopped. Check the cable "
+                     "and connect again on the Devices page.")
+                      .arg(reason)); });
 }
 
 MainWindow::~MainWindow()
@@ -96,6 +137,10 @@ MainWindow::~MainWindow()
         m_pm->setSplitterState(m_splitter->saveState());
     QSettings settings;
     m_pm->save(settings);
+    // Pages and the playback bar subscribe to the context's DataHub and use
+    // its services, so they go first. The context is an earlier child and
+    // would otherwise be destroyed before them.
+    delete takeCentralWidget();
     delete ui;
 }
 

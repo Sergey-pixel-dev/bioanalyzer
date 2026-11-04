@@ -71,7 +71,17 @@ void ThemeManager::apply()
     const QString panel = dark ? QStringLiteral("#2f343d") : QStringLiteral("#e8ebf0");
     const QString border = dark ? QStringLiteral("#3a3f49") : QStringLiteral("#c7ccd5");
     const QString selected = dark ? QStringLiteral("#0096c8") : QStringLiteral("#006cae");
-    m_application->setStyleSheet(QStringLiteral(
+    const QString foreground = text.name();
+    // Список раскрытого поля выбора задаётся явно. Иначе правило для QComboBox
+    // переносит белый фон поля на выделенный пункт списка, а текст выделенного
+    // пункта белый: в светлой теме пункт становится невидимым.
+    const QString popup = QStringLiteral(
+        "QComboBox QAbstractItemView { background: %1; color: %2; border: 1px solid %3;"
+        " selection-background-color: %4; selection-color: white; outline: 0; }"
+        "QComboBox::item { color: %2; }"
+        "QComboBox::item:selected { background: %4; color: white; }")
+        .arg(bg, foreground, border, selected);
+    m_application->setStyleSheet(popup + QStringLiteral(
         "QWidget { font-size: 10.5pt; }"
         "QGroupBox { border: 1px solid %1; border-radius: 6px; margin-top: 10px; padding: 6px; }"
         "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"

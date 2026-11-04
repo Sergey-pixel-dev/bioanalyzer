@@ -5,6 +5,7 @@
 #include <QString>
 #include <QHash>
 #include <QPointer>
+#include <QMessageBox>
 
 class QWidget;
 class QLabel;
@@ -33,8 +34,10 @@ public:
     explicit Notifications(QObject *parent = nullptr);
     ~Notifications() override;
 
-    // Модальные диалоги. Обёртки над QMessageBox с дополнительным
-    // обновлением статуса вызывающей страницы (по objectName ctx).
+    // Окна сообщений. Ошибки и отказы выводятся только окном: строка
+    // состояния страницы показывает лишь ход работы (status()). Окно
+    // открывается без ожидания ответа, над главным окном; одинаковое
+    // незакрытое сообщение не повторяется.
     void info    (QWidget *ctx, const QString &title, const QString &text);
     void warning (QWidget *ctx, const QString &title, const QString &text);
     void error   (QWidget *ctx, const QString &title, const QString &text);
@@ -60,9 +63,11 @@ signals:
 
 private:
     static QString scopeOf(QWidget *ctx);
+    void showBox(QWidget *ctx, QMessageBox::Icon icon, const QString &title, const QString &text);
 
     QHash<QString, QString> m_lastStatus;
     QHash<QString, QPointer<QLabel>> m_labels;
+    QHash<QString, QPointer<QMessageBox>> m_openBoxes; // открытые окна по заголовку и тексту
 };
 
 #endif // NOTIFICATIONS_NOTIFICATIONS_H

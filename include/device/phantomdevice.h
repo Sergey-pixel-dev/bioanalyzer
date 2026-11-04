@@ -9,25 +9,30 @@
 #include <memory>
 
 #include "exchange/itransport.h"
-#include "datahub/sessionrecord.h"
+#include "device/sessionrecord.h"
 
-// Virtual device that behaves like the real ECG/ADC MCU over SerProt.
+// Virtual device: plays a recorded .bsig session back as if it were the real
+// ECG/ADC MCU over SerProt.
 //
 // It implements ITransport, so the exact same TransportProtocol +
 // ApplicationProtocol stack drives it — nothing above the transport layer knows
-// whether it is talking to real hardware or this phantom. That keeps the
-// playback path identical to the live path.
+// whether it is talking to real hardware or to the virtual device. That keeps
+// the playback path identical to the live path.
 //
-// The phantom parses Command frames the master writes (stream control,
-// configuration, and the global InputShort/TestSignal/NormalInput modes),
-// answers with Response frames, and — while streaming — emits Push frames.
-// The Push payload comes
-// from a recorded .bsig session (playback) advanced by pump(), which the
-// owner calls on a timer at the recording's sample rate.
+// It parses the Command frames the master writes, answers with Response
+// frames and, while streaming, emits Push frames with the recording's samples.
+// The device configuration is the recording's:
+//   * GetDeviceInfo reports the recording's channel count and description;
+//   * channels are numbered 0..N-1 by their position in the recording, not by
+//     the physical ADC inputs they were captured from;
+//   * SetSamplerate accepts only the recording's rate, gain is accepted and
+//     ignored, and only the normal input exists (no short or test signal).
 //
-// Playback controls (play/pause/seek/speed) let the UI scrub a recording.
+// StartStream plays from the current position and loops at the end of the
+// recording; StopStream stops and keeps the position. seekToSample() may be
+// called at any time. pump() advances playback by elapsed wall-clock time.
 //
-// Pure C++/POSIX: no Qt.
+// All calls come from the thread that polls the transport. Pure C++: no Qt.
 class PhantomDevice : public ITransport
 {
 public:
@@ -35,7 +40,7 @@ public:
     ~PhantomDevice() override = default;
 
     // Load a recording to play back. Must be called before open()/streaming.
-    bool loadRecording(const std::string &path);
+    bool loadRecording(const std::string &path, std::string *error = nullptr);
 
     // ITransport.
     int open() override;
@@ -44,19 +49,13 @@ public:
     int read(uint8_t *buf, int length) override;        // phantom -> master
     bool isOpen() const override { return m_open; }
 
-    // Advance playback by `elapsedMs` of wall-clock time. Generates Push
-    // frames for the samples that fall in that interval (scaled by speed).
-    // Call from a timer. No-op unless streaming and playing.
+    // Advance playback by `elapsedMs` of wall-clock time: generates Push
+    // frames for the samples that fall in that interval, wrapping to the
+    // start of the recording at its end. No-op unless streaming.
     void pump(double elapsedMs);
+    bool isStreaming() const { return m_streaming; }
 
-    // Playback transport controls.
-    void play() { m_playing = true; }
-    void pause() { m_playing = false; }
-    bool isPlaying() const { return m_playing; }
-    void setSpeed(double factor) { m_speed = factor > 0 ? factor : 1.0; }
-    double speed() const { return m_speed; }
-
-    // Seek to an absolute sample index in the recording.
+    // Continue playback from an absolute sample index of the recording.
     void seekToSample(uint64_t index);
     uint64_t positionSample() const { return m_playIndex; }
     uint64_t totalSamples() const { return m_reader.sampleCount(); }
@@ -104,11 +103,8 @@ private:
 
     // Streaming state.
     bool m_streaming = false;
-    bool m_playing = false;
-    // Global ADS1298 input MUX mode (0x31, 0x32 or 0x33).
-    uint8_t m_inputMode = 0x33;
-    double m_speed = 1.0;
-    std::vector<uint8_t> m_activeChannels; // physical indices requested
+    std::vector<uint8_t> m_selectedChannels; // set by SetChannels
+    std::vector<uint8_t> m_activeChannels;   // streaming now
     uint8_t m_pushSeq = 0;
 
     // Playback source.

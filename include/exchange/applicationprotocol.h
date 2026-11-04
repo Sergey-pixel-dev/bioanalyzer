@@ -14,7 +14,12 @@ class TransportProtocol;
 // Implements the command surface from Protocols/Application_Layer_Protocol.md:
 //   0x01 StartStream, 0x02 StopStream,
 //   0x11 SetSamplerate, 0x20 GetDeviceInfo, 0x30 SetGain,
-//   0x31 InputShort, 0x32 TestSignal, 0x33 NormalInput.
+//   0x31 InputShort, 0x32 TestSignal, 0x33 NormalInput,
+//   0x34 SetChannels.
+//
+// The active channel set is standing device configuration, applied by
+// SetChannels exactly like gain or sample rate; StartStream takes no
+// parameters and runs over the selection last acknowledged.
 //
 // It also decodes Push payloads (24-bit signed, little-endian, interleaved by
 // active channel) into per-channel µV samples.
@@ -55,6 +60,7 @@ public:
         SetTestSignal = 0x32,
         TestSignal = SetTestSignal,
         NormalInput = 0x33,
+        SetChannels = 0x34,
     };
 
     // Controller capabilities/constants.
@@ -98,11 +104,17 @@ public:
 
     void setTransport(TransportProtocol *transport);
     void setSampleHandler(SampleHandler handler) { m_sampleHandler = std::move(handler); }
+    // Called for a Push frame whose length does not match the active channels.
+    void setMalformedPushHandler(std::function<void()> handler) { m_malformedPushHandler = std::move(handler); }
 
     std::string name() const { return "EMG/ADC"; }
 
-    // Commands. `channels` must be sorted ascending, unique, within 0..7.
-    int startStream(const std::vector<uint8_t> &channels, AckHandler onAck = {});
+    // Select the active channel set. `channels` must be sorted ascending,
+    // unique, within 0..7. Rejected by the device while streaming: the Push
+    // payload size is derived from the channel count.
+    int setChannels(const std::vector<uint8_t> &channels, AckHandler onAck = {});
+    // Start streaming over the channel set selected by setChannels().
+    int startStream(AckHandler onAck = {});
     int stopStream(AckHandler onAck = {});
     int setSamplerate(uint8_t idx, AckHandler onAck = {});
     int setGain(uint8_t channel, uint8_t gainCode, AckHandler onAck = {});
@@ -116,8 +128,10 @@ public:
     // Decode a GetDeviceInfo response payload. Returns false if malformed.
     static bool decodeDeviceInfo(const uint8_t *payload, int len, DeviceInfo &out);
 
-    // Currently active channel set (set on a successful startStream).
+    // Channel set the device streams right now (empty while stopped).
     const std::vector<uint8_t> &activeChannels() const { return m_activeChannels; }
+    // Channel set selected by setChannels(); survives stopStream().
+    const std::vector<uint8_t> &selectedChannels() const { return m_selectedChannels; }
 
     // Decode raw 24-bit signed little-endian sample at data[0..2] into µV.
     static int32_t decodeSample(const uint8_t *p);
@@ -127,8 +141,9 @@ private:
 
     TransportProtocol *m_transport = nullptr;
     SampleHandler m_sampleHandler;
-    std::vector<uint8_t> m_activeChannels;
-    std::vector<uint8_t> m_pendingChannels; // channels awaiting StartStream ack
+    std::function<void()> m_malformedPushHandler;
+    std::vector<uint8_t> m_activeChannels;   // streaming now
+    std::vector<uint8_t> m_selectedChannels; // acknowledged by SetChannels
 };
 
 #endif // APPLICATIONPROTOCOL_H

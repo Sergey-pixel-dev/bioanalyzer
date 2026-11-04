@@ -4,6 +4,11 @@
 
 namespace dsp
 {
+    namespace
+    {
+        // M_PI is not part of standard C++ (Windows compilers lack it).
+        constexpr double kPi = 3.14159265358979323846;
+    }
 
     void Biquad::configure(Type type, double fs, double f0, double q)
     {
@@ -16,7 +21,7 @@ namespace dsp
             return;
         }
 
-        const double w0 = 2.0 * M_PI * f0 / fs;
+        const double w0 = 2.0 * kPi * f0 / fs;
         const double cosw0 = std::cos(w0);
         const double sinw0 = std::sin(w0);
         const double alpha = sinw0 / (2.0 * q);

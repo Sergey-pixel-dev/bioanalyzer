@@ -27,6 +27,14 @@ void MainWindowPresentationModel::setAiExpanded(bool expanded)
     emit aiExpandedChanged(expanded);
 }
 
+void MainWindowPresentationModel::setPlaybackBarExpanded(bool expanded)
+{
+    if (m_playbackBarExpanded == expanded)
+        return;
+    m_playbackBarExpanded = expanded;
+    emit playbackBarExpandedChanged(expanded);
+}
+
 void MainWindowPresentationModel::selectPage(int page)
 {
     // Negative indices identify navigation groups. They only toggle the
@@ -51,6 +59,7 @@ void MainWindowPresentationModel::restore(QSettings &settings)
 {
     setMainMenuVisible(settings.value(QStringLiteral("navigation/mainMenuVisible"), true).toBool());
     setAiExpanded(settings.value(QStringLiteral("navigation/aiExpanded"), true).toBool());
+    setPlaybackBarExpanded(settings.value(QStringLiteral("navigation/playbackBarExpanded"), true).toBool());
     setSplitterState(settings.value(QStringLiteral("navigation/splitterState")).toByteArray());
 }
 
@@ -58,5 +67,6 @@ void MainWindowPresentationModel::save(QSettings &settings) const
 {
     settings.setValue(QStringLiteral("navigation/mainMenuVisible"), m_mainMenuVisible);
     settings.setValue(QStringLiteral("navigation/aiExpanded"), m_aiExpanded);
+    settings.setValue(QStringLiteral("navigation/playbackBarExpanded"), m_playbackBarExpanded);
     settings.setValue(QStringLiteral("navigation/splitterState"), m_splitterState);
 }

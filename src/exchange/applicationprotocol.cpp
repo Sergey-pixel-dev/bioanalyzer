@@ -80,7 +80,7 @@ namespace
     }
 } // namespace
 
-int ApplicationProtocol::startStream(const std::vector<uint8_t> &channels, AckHandler onAck)
+int ApplicationProtocol::setChannels(const std::vector<uint8_t> &channels, AckHandler onAck)
 {
     if (m_transport == nullptr)
         return -1;
@@ -88,9 +88,6 @@ int ApplicationProtocol::startStream(const std::vector<uint8_t> &channels, AckHa
         return -1;
 
     // Validate: sorted ascending, unique, within 0..7.
-    /*
-    TODO: можно убрать требования сортировки. Тогда надо подправить и application протокол.
-    */
     for (size_t i = 0; i < channels.size(); ++i)
     {
         if (channels[i] > 7)
@@ -101,22 +98,43 @@ int ApplicationProtocol::startStream(const std::vector<uint8_t> &channels, AckHa
 
     std::vector<uint8_t> payload;
     payload.reserve(2 + channels.size());
-    payload.push_back(static_cast<uint8_t>(Cmd::StartStream));
+    payload.push_back(static_cast<uint8_t>(Cmd::SetChannels));
     payload.push_back(static_cast<uint8_t>(channels.size()));
     for (uint8_t ch : channels)
         payload.push_back(ch);
 
-    m_pendingChannels = channels;
-
     auto inner = makeResultAdapter(std::move(onAck));
     auto self = this;
-    auto pending = channels;
+    auto selected = channels;
     return m_transport->sendCommand(
         payload.data(), static_cast<int>(payload.size()),
-        [self, pending, inner](bool ok, const uint8_t *p, int len)
+        [self, selected, inner](bool ok, const uint8_t *p, int len)
+        {
+            // Набор запоминается только по подтверждению устройства: иначе
+            // разбор Push-пакетов шёл бы по набору, который не применён.
+            if (ok)
+                self->m_selectedChannels = selected;
+            if (inner)
+                inner(ok, p, len);
+        });
+}
+
+int ApplicationProtocol::startStream(AckHandler onAck)
+{
+    if (m_transport == nullptr)
+        return -1;
+    if (m_selectedChannels.empty())
+        return -1;
+
+    uint8_t payload = static_cast<uint8_t>(Cmd::StartStream);
+    auto inner = makeResultAdapter(std::move(onAck));
+    auto self = this;
+    return m_transport->sendCommand(
+        &payload, 1,
+        [self, inner](bool ok, const uint8_t *p, int len)
         {
             if (ok)
-                self->m_activeChannels = pending;
+                self->m_activeChannels = self->m_selectedChannels;
             if (inner)
                 inner(ok, p, len);
         });
@@ -133,11 +151,10 @@ int ApplicationProtocol::stopStream(AckHandler onAck)
         &payload, 1,
         [self, inner](bool ok, const uint8_t *p, int len)
         {
+            // Выбранный набор — постоянная настройка устройства и остановку
+            // потока переживает; очищается только текущий активный набор.
             if (ok)
-            {
                 self->m_activeChannels.clear();
-                self->m_pendingChannels.clear();
-            }
             if (inner)
                 inner(ok, p, len);
         });
@@ -230,7 +247,13 @@ void ApplicationProtocol::onPush(const uint8_t *payload, int len, uint8_t seq)
     const int bytesPerSampleSet = n * 3;
     // Firmware emits exactly one complete ADC conversion per Push.
     if (bytesPerSampleSet == 0 || len != bytesPerSampleSet)
-        return; // malformed; drop
+    {
+        // Malformed: dropped, but counted so that a stream of nothing but
+        // bad frames is not taken for a live link.
+        if (m_malformedPushHandler)
+            m_malformedPushHandler();
+        return;
+    }
 
     SampleFrame frame;
     frame.pushSequence = seq;

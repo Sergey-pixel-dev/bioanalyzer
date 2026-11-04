@@ -18,6 +18,7 @@ namespace
     constexpr uint8_t kSetShortInput = 0x31;
     constexpr uint8_t kSetTestSignal = 0x32;
     constexpr uint8_t kNormalInput = 0x33;
+    constexpr uint8_t kSetChannels = 0x34;
 
     // Frame types.
     constexpr uint8_t kResponse = 0xDD;
@@ -47,9 +48,9 @@ uint16_t PhantomDevice::crc16Modbus(const uint8_t *data, int len)
     return crc;
 }
 
-bool PhantomDevice::loadRecording(const std::string &path)
+bool PhantomDevice::loadRecording(const std::string &path, std::string *error)
 {
-    if (!m_reader.open(path))
+    if (!m_reader.open(path, error))
         return false;
     m_sampleRate = static_cast<int>(m_reader.header().sampleRate);
     m_playIndex = 0;
@@ -67,7 +68,6 @@ int PhantomDevice::close()
 {
     m_open = false;
     m_streaming = false;
-    m_playing = false;
     return 0;
 }
 
@@ -216,39 +216,58 @@ void PhantomDevice::handleCommand(const uint8_t *payload, int len)
     const uint8_t cmd = payload[0];
     switch (cmd)
     {
-    case kStartStream:
+    case kSetChannels:
     {
+        // Набор каналов — постоянная настройка; менять его на ходу нельзя:
+        // от него зависит размер Push-пакета.
         if (len < 2)
         {
             queueError(m_rxSeq, 0x06);
             return;
         }
-        const bool wasPlaying = m_playing;
-        const bool wasStreaming = m_streaming;
+        if (m_streaming)
+        {
+            queueError(m_rxSeq, 0x03);
+            return;
+        }
         const uint8_t n = payload[1];
         if (n == 0 || n > 8 || len != 2 + n)
         {
             queueError(m_rxSeq, 0x02);
             return;
         }
+        // Channels are the recording's columns, numbered by position.
+        const size_t recorded = m_reader.header().channels.size();
         std::vector<uint8_t> chans;
         for (int i = 0; i < n; ++i)
         {
             const uint8_t ch = payload[2 + i];
-            if (ch > 7 || (!chans.empty() && ch <= chans.back()))
+            if (ch >= recorded || (!chans.empty() && ch <= chans.back()))
             {
                 queueError(m_rxSeq, 0x02);
                 return;
             }
             chans.push_back(ch);
         }
-        m_activeChannels = chans;
+        m_selectedChannels = chans;
+        queueResponseOk(m_rxSeq);
+        break;
+    }
+    case kStartStream:
+    {
+        if (len != 1)
+        {
+            queueError(m_rxSeq, 0x06);
+            return;
+        }
+        if (m_selectedChannels.empty())
+        {
+            queueError(m_rxSeq, 0x03); // набор каналов не задан
+            return;
+        }
+        // Playback continues from the current position.
+        m_activeChannels = m_selectedChannels;
         m_streaming = true;
-        // The first stream command starts a loaded recording. Re-applying a
-        // channel selection while already streaming preserves an explicit
-        // paused state (important when the user toggles channels during
-        // playback).
-        m_playing = wasStreaming ? wasPlaying : true;
         m_sampleAccumulator = 0.0;
         queueResponseOk(m_rxSeq);
         break;
@@ -280,12 +299,12 @@ void PhantomDevice::handleCommand(const uint8_t *payload, int len)
             queueError(m_rxSeq, 0x06);
             return;
         }
-        if (payload[1] >= 5)
+        // The rate is the recording's; any other rate is a bad parameter.
+        if (payload[1] >= 5 || kSampleRateHz[payload[1]] != m_sampleRate)
         {
             queueError(m_rxSeq, 0x02);
             return;
         }
-        m_sampleRate = kSampleRateHz[payload[1]];
         queueResponseOk(m_rxSeq);
         break;
     }
@@ -296,27 +315,9 @@ void PhantomDevice::handleCommand(const uint8_t *payload, int len)
             queueResponseOk(m_rxSeq);
         break;
     case kSetShortInput:
-        if (len != 1)
-            queueError(m_rxSeq, 0x06);
-        else if (m_streaming)
-            queueError(m_rxSeq, 0x02);
-        else
-        {
-            m_inputMode = kSetShortInput;
-            queueResponseOk(m_rxSeq);
-        }
-        break;
     case kSetTestSignal:
-        if (len != 3)
-            queueError(m_rxSeq, 0x06);
-        else if (m_streaming || payload[1] > 1 ||
-                 (payload[2] != 0 && payload[2] != 1))
-            queueError(m_rxSeq, 0x02);
-        else
-        {
-            m_inputMode = kSetTestSignal;
-            queueResponseOk(m_rxSeq);
-        }
+        // A recording has only the normal input.
+        queueError(m_rxSeq, 0x02);
         break;
     case kNormalInput:
         if (len != 1)
@@ -324,17 +325,23 @@ void PhantomDevice::handleCommand(const uint8_t *payload, int len)
         else if (m_streaming)
             queueError(m_rxSeq, 0x02);
         else
-        {
-            m_inputMode = kNormalInput;
             queueResponseOk(m_rxSeq);
-        }
         break;
     case kGetDeviceInfo:
     {
         // Report the recording's geometry so the app treats the phantom like
         // the real device it was captured from.
         const auto &hdr = m_reader.header();
-        const std::string desc = "Playback";
+        // The description field is one length byte long: cut the recording's
+        // description to 255 bytes without splitting a UTF-8 character.
+        std::string desc = hdr.description.empty() ? std::string("Recording") : hdr.description;
+        if (desc.size() > 255)
+        {
+            size_t cut = 255;
+            while (cut > 0 && (static_cast<unsigned char>(desc[cut]) & 0xC0) == 0x80)
+                --cut;
+            desc.resize(cut);
+        }
         std::vector<uint8_t> payload;
         payload.push_back(0x01); // device_id L (ECG/ADC front-end)
         payload.push_back(0x00); // device_id H
@@ -399,39 +406,35 @@ void PhantomDevice::queueFrame(uint8_t type, uint8_t seq, const std::vector<uint
 
 void PhantomDevice::seekToSample(uint64_t index)
 {
-    m_playIndex = std::min<uint64_t>(index, totalSamples());
+    const uint64_t total = totalSamples();
+    m_playIndex = total == 0 ? 0 : std::min<uint64_t>(index, total - 1);
     m_sampleAccumulator = 0.0;
 }
 
 void PhantomDevice::pump(double elapsedMs)
 {
-    if (!m_streaming || !m_playing || !m_reader.isOpen() || m_activeChannels.empty())
+    if (!m_streaming || !m_reader.isOpen() || m_activeChannels.empty())
         return;
 
     const uint64_t total = totalSamples();
-    if (m_playIndex >= total)
-    {
-        m_playing = false; // reached end
+    if (total == 0)
         return;
-    }
 
     // How many samples of recorded time to advance.
-    m_sampleAccumulator += (elapsedMs / 1000.0) * m_sampleRate * m_speed;
+    m_sampleAccumulator += (elapsedMs / 1000.0) * m_sampleRate;
     uint64_t toEmit = static_cast<uint64_t>(m_sampleAccumulator);
     if (toEmit == 0)
         return;
     m_sampleAccumulator -= static_cast<double>(toEmit);
 
-    if (m_playIndex + toEmit > total)
-        toEmit = total - m_playIndex;
-
     // Firmware contract: one Push carries exactly one complete sample set.
-    uint64_t remaining = toEmit;
-    while (remaining > 0)
+    // The recording is played in a loop.
+    for (uint64_t i = 0; i < toEmit; ++i)
     {
+        if (m_playIndex >= total)
+            m_playIndex = 0;
         emitPushForSamples(m_playIndex, 1);
         ++m_playIndex;
-        --remaining;
     }
 }
 
@@ -443,23 +446,14 @@ void PhantomDevice::emitPushForSamples(uint64_t startIndex, size_t count)
     if (got == 0)
         return;
 
-    const auto &recChannels = m_reader.header().channels;
-    const int recCh = static_cast<int>(recChannels.size());
+    const int recCh = static_cast<int>(m_reader.header().channels.size());
 
-    // Map each active (requested) physical channel to its column in the
-    // recording. If the recording lacks that physical channel, emit zeros.
+    // A channel of the virtual device is a column of the recording, numbered
+    // by position; SetChannels has already rejected numbers past the last one.
     std::vector<int> colOf(m_activeChannels.size(), -1);
     for (size_t a = 0; a < m_activeChannels.size(); ++a)
-    {
-        for (int c = 0; c < recCh; ++c)
-        {
-            if (recChannels[c].physIndex == m_activeChannels[a])
-            {
-                colOf[a] = c;
-                break;
-            }
-        }
-    }
+        if (m_activeChannels[a] < recCh)
+            colOf[a] = m_activeChannels[a];
 
     std::vector<uint8_t> payload;
     payload.reserve(got * m_activeChannels.size() * 3);

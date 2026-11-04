@@ -9,6 +9,11 @@
 
 namespace dsp
 {
+    namespace
+    {
+        // kPi is not part of standard C++ (Windows compilers lack it).
+        constexpr double kPi = 3.14159265358979323846;
+    }
 
     std::vector<double> SpectrumAnalyzer::makeWindow(Window type, size_t n)
     {
@@ -25,14 +30,14 @@ namespace dsp
                 w[i] = 1.0;
                 break;
             case Window::Hann:
-                w[i] = 0.5 - 0.5 * std::cos(2.0 * M_PI * x);
+                w[i] = 0.5 - 0.5 * std::cos(2.0 * kPi * x);
                 break;
             case Window::Hamming:
-                w[i] = 0.54 - 0.46 * std::cos(2.0 * M_PI * x);
+                w[i] = 0.54 - 0.46 * std::cos(2.0 * kPi * x);
                 break;
             case Window::Blackman:
-                w[i] = 0.42 - 0.5 * std::cos(2.0 * M_PI * x) +
-                       0.08 * std::cos(4.0 * M_PI * x);
+                w[i] = 0.42 - 0.5 * std::cos(2.0 * kPi * x) +
+                       0.08 * std::cos(4.0 * kPi * x);
                 break;
             }
         }

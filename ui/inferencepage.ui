@@ -16,8 +16,11 @@
     <layout class="QFormLayout" name="settingsForm">
      <item row="0" column="0"><widget class="QLabel" name="strideLabel"><property name="text"><string>Inference stride (samples):</string></property></widget></item>
      <item row="0" column="1"><widget class="QSpinBox" name="inferenceStride"><property name="minimum"><number>1</number></property><property name="maximum"><number>100000000</number></property><property name="value"><number>1</number></property></widget></item>
+     <item row="1" column="0"><widget class="QLabel" name="smoothingLabel"><property name="text"><string>Smoothing (s):</string></property></widget></item>
+     <item row="1" column="1"><widget class="QDoubleSpinBox" name="smoothingSeconds"><property name="toolTip"><string>Time constant of the averaging of the probabilities over the windows; the gesture shown changes only when another one leads it by 0.1</string></property><property name="specialValueText"><string>off</string></property><property name="decimals"><number>1</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.5</double></property></widget></item>
     </layout>
    </item>
+   <item><widget class="QLabel" name="resultLabel"><property name="text"><string notr="true">-</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="styleSheet"><string notr="true">font-size: 24pt; font-weight: bold;</string></property></widget></item>
    <item>
     <widget class="QTableWidget" name="resultsTable">
      <property name="columnCount"><number>2</number></property>

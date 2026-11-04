@@ -1,0 +1,3 @@
+// Application manifest for MinGW builds (MSVC takes biosignal.manifest
+// directly); 24 is RT_MANIFEST, 1 the manifest of the process.
+1 24 "biosignal.manifest"

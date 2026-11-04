@@ -1,5 +1,6 @@
 #include "notifications/Notifications.h"
 
+#include <QApplication>
 #include <QLabel>
 #include <QMessageBox>
 #include <QWidget>
@@ -17,23 +18,44 @@ QString Notifications::scopeOf(QWidget *ctx)
 
 void Notifications::info(QWidget *ctx, const QString &title, const QString &text)
 {
-    QMessageBox::information(ctx, title, text);
+    showBox(ctx, QMessageBox::Information, title, text);
     emit messageEmitted(Level::Info, title, text);
-    status(scopeOf(ctx), text, Level::Info);
 }
 
 void Notifications::warning(QWidget *ctx, const QString &title, const QString &text)
 {
-    QMessageBox::warning(ctx, title, text);
+    showBox(ctx, QMessageBox::Warning, title, text);
     emit messageEmitted(Level::Warning, title, text);
-    status(scopeOf(ctx), text, Level::Warning);
 }
 
 void Notifications::error(QWidget *ctx, const QString &title, const QString &text)
 {
-    QMessageBox::critical(ctx, title, text);
+    showBox(ctx, QMessageBox::Critical, title, text);
     emit messageEmitted(Level::Error, title, text);
-    status(scopeOf(ctx), text, Level::Error);
+}
+
+void Notifications::showBox(QWidget *ctx, QMessageBox::Icon icon,
+                            const QString &title, const QString &text)
+{
+    // Одинаковое сообщение, ещё не закрытое оператором, не повторяется:
+    // отказ, приходящий много раз подряд, даёт одно окно.
+    const QString key = title + QChar(0x1f) + text;
+    if (QPointer<QMessageBox> open = m_openBoxes.value(key))
+    {
+        open->raise();
+        open->activateWindow();
+        return;
+    }
+    // Окно открывается над главным окном, даже если породившая сообщение
+    // страница скрыта, и без вложенного цикла событий: асинхронный отказ
+    // приходит из обработчика сигнала, который не должен ждать оператора.
+    QWidget *parent = ctx ? ctx->window() : QApplication::activeWindow();
+    auto *box = new QMessageBox(icon, title, text, QMessageBox::Ok, parent);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    m_openBoxes.insert(key, box);
+    connect(box, &QObject::destroyed, this, [this, key]
+            { m_openBoxes.remove(key); });
+    box->open();
 }
 
 bool Notifications::question(QWidget *ctx, const QString &title, const QString &text)

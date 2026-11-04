@@ -4,11 +4,66 @@
 
 #include <algorithm>
 #include <chrono>
-#include <dirent.h>
 #include <thread>
 #include <stdexcept>
 #include <cstddef>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dirent.h>
+#endif
+
+#ifdef _WIN32
+std::vector<DeviceSession::PortInfo> DeviceSession::discoverPorts()
+{
+    std::vector<PortInfo> ports;
+
+    // Every serial port present in the system is a value of this key: the
+    // name is the driver's device object, the data is the port name (COM3).
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return ports;
+    for (DWORD index = 0;; ++index)
+    {
+        wchar_t name[256];
+        DWORD nameLength = 256;
+        wchar_t data[64];
+        DWORD dataBytes = sizeof(data);
+        DWORD type = 0;
+        const LONG status = RegEnumValueW(key, index, name, &nameLength, nullptr, &type,
+                                          reinterpret_cast<BYTE *>(data), &dataBytes);
+        if (status == ERROR_NO_MORE_ITEMS)
+            break;
+        if (status != ERROR_SUCCESS || type != REG_SZ)
+            continue;
+
+        const std::wstring device(name, nameLength);
+        std::wstring port(data, dataBytes / sizeof(wchar_t));
+        while (!port.empty() && port.back() == L'\0')
+            port.pop_back();
+        PortInfo info;
+        for (wchar_t c : port) // port names are ASCII
+            info.path.push_back(static_cast<char>(c));
+        // USB CDC devices are served by the system usbser driver.
+        info.description = device.find(L"USBSER") != std::wstring::npos ? "USB CDC (ACM)" : "USB serial";
+        ports.push_back(std::move(info));
+    }
+    RegCloseKey(key);
+
+    // COM2 before COM10.
+    std::sort(ports.begin(), ports.end(),
+              [](const PortInfo &a, const PortInfo &b)
+              { return a.path.size() != b.path.size() ? a.path.size() < b.path.size() : a.path < b.path; });
+    return ports;
+}
+#else
 std::vector<DeviceSession::PortInfo> DeviceSession::discoverPorts()
 {
     std::vector<PortInfo> ports;
@@ -38,6 +93,7 @@ std::vector<DeviceSession::PortInfo> DeviceSession::discoverPorts()
               { return a.path < b.path; });
     return ports;
 }
+#endif
 
 DeviceSession::ProbeResult DeviceSession::probePortDetailed(const std::string &portPath,
                                                             int baud, int timeoutMs,
@@ -158,10 +214,9 @@ DeviceSession::scanDevices(int baud, int timeoutMs, int maxAttempts)
     return found;
 }
 
-DeviceSession::DeviceSession(ITransport *transport, DataHub *dataHub, bool ownTransport)
-    : m_transport(transport),
-      m_ownTransport(ownTransport),
-      m_transportProto(transport),
+DeviceSession::DeviceSession(std::unique_ptr<ITransport> transport, DataHub *dataHub)
+    : m_transport(std::move(transport)),
+      m_transportProto(m_transport.get()),
       m_app(&m_transportProto),
       m_dataHub(dataHub)
 {
@@ -169,6 +224,9 @@ DeviceSession::DeviceSession(ITransport *transport, DataHub *dataHub, bool ownTr
         throw std::invalid_argument("DeviceSession requires a DataHub");
     m_app.setSampleHandler([this](const ApplicationProtocol::SampleFrame &frame)
                            { onSamples(frame); });
+    m_transportProto.setParseErrorHandler([this](TransportProtocol::ParseError)
+                                          { ++m_rejectedFrames; });
+    m_app.setMalformedPushHandler([this] { ++m_rejectedFrames; });
 }
 
 DeviceSession::~DeviceSession()
@@ -176,8 +234,6 @@ DeviceSession::~DeviceSession()
     // Do not drop a trailing sub-25 ms block when the session is torn down.
     flushPublishedSamples();
     stopRecording();
-    if (m_ownTransport)
-        delete m_transport;
 }
 
 void DeviceSession::setBufferCapacity(size_t samplesPerChannel)
@@ -190,6 +246,11 @@ bool DeviceSession::open()
     if (m_transport == nullptr)
         return false;
     return m_transport->open() >= 0;
+}
+
+std::string DeviceSession::lastOpenError() const
+{
+    return m_transport ? m_transport->lastError() : std::string();
 }
 
 void DeviceSession::close()
@@ -206,18 +267,26 @@ bool DeviceSession::isOpen() const
 
 int DeviceSession::poll()
 {
+    m_queue.drain();
     return m_transportProto.poll();
 }
 
-int DeviceSession::startStream(const std::vector<uint8_t> &channels, ApplicationProtocol::AckHandler onAck)
+int DeviceSession::setChannels(const std::vector<uint8_t> &channels,
+                               ApplicationProtocol::AckHandler onAck)
+{
+    return m_app.setChannels(channels, std::move(onAck));
+}
+
+int DeviceSession::startStream(ApplicationProtocol::AckHandler onAck)
 {
     // Channel geometry is fixed for a stream. Any trailing data belongs to the
     // previous stream and must be emitted before a new geometry is installed.
     flushPublishedSamples();
     resetPublishBatch();
-    // Size the rolling buffer to the active channel count before streaming.
-    m_buffer.configure(static_cast<int>(channels.size()), m_bufferCapacity);
-    return m_app.startStream(channels, std::move(onAck));
+    // Size the rolling buffer to the selected channel count before streaming.
+    m_buffer.configure(static_cast<int>(m_app.selectedChannels().size()),
+                       m_bufferCapacity);
+    return m_app.startStream(std::move(onAck));
 }
 
 int DeviceSession::stopStream(ApplicationProtocol::AckHandler onAck)
@@ -310,7 +379,7 @@ bool DeviceSession::startRecording(const std::string &path, const std::string &d
 
     m_writer = std::make_unique<SessionWriter>();
     SessionHeader header;
-    header.version = 2;
+    header.version = kSessionFormatVersion;
     header.sampleRate = static_cast<uint32_t>(m_sampleRateHz);
     header.vrefMv = ApplicationProtocol::kFixedReferenceVoltageMv;
     header.description = description;
@@ -350,8 +419,6 @@ void DeviceSession::publishPending(size_t count)
     DataHub::Block block;
     block.firstSample = m_publishFirstSample;
     block.pushSequence = m_publishLastSequence;
-    block.sampleRateHz = m_sampleRateHz;
-    block.channels = m_publishChannels;
     block.samples.resize(m_publishPending.size());
     for (size_t channel = 0; channel < m_publishPending.size(); ++channel)
     {

@@ -14,6 +14,7 @@ public:
 
     bool isMainMenuVisible() const { return m_mainMenuVisible; }
     bool isAiExpanded() const { return m_aiExpanded; }
+    bool isPlaybackBarExpanded() const { return m_playbackBarExpanded; }
     int currentPage() const { return m_currentPage; }
     const QByteArray &splitterState() const { return m_splitterState; }
 
@@ -24,17 +25,20 @@ public slots:
     void toggleMainMenu();
     void setMainMenuVisible(bool visible);
     void setAiExpanded(bool expanded);
+    void setPlaybackBarExpanded(bool expanded);
     void selectPage(int page);
     void setSplitterState(const QByteArray &state);
 
 signals:
     void mainMenuVisibleChanged(bool visible);
     void aiExpandedChanged(bool expanded);
+    void playbackBarExpandedChanged(bool expanded);
     void currentPageChanged(int page);
 
 private:
     bool m_mainMenuVisible = true;
     bool m_aiExpanded = true;
+    bool m_playbackBarExpanded = true;
     int m_currentPage = 0;
     QByteArray m_splitterState;
 };

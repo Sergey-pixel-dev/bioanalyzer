@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QPointer>
 
 QT_BEGIN_NAMESPACE
 namespace Ui
@@ -14,6 +15,7 @@ class MainWindowPresentationModel;
 class QTreeWidgetItem;
 class QSplitter;
 class AppContext;
+class QtDeviceSessionAdapter;
 
 class MainWindow : public QMainWindow
 {
@@ -29,11 +31,17 @@ private slots:
     void onNavigationItem(QTreeWidgetItem *item, int column);
 
 private:
+    // Отказы устройства выводятся службой сообщений над главным окном, на
+    // какой бы странице ни был оператор: сообщение об ошибке команды и
+    // сообщение о потере связи.
+    void watchSession(QtDeviceSessionAdapter *session);
+
     Ui::MainWindow *ui;
     MainWindowPresentationModel *m_pm;
     AppContext *m_context;
     QSplitter *m_splitter = nullptr;
     QTreeWidgetItem *m_aiItem = nullptr;
+    QPointer<QtDeviceSessionAdapter> m_watchedSession;
 };
 
 #endif // MAINWINDOW_H

@@ -8,9 +8,10 @@
 
 #include "exchange/transportprotocol.h"
 #include "exchange/applicationprotocol.h"
-#include "datahub/samplebuffer.h"
-#include "datahub/sessionrecord.h"
+#include "device/samplebuffer.h"
+#include "device/sessionrecord.h"
 #include "datahub/datahub.h"
+#include "datahub/commandqueue.h"
 
 class ITransport;
 
@@ -19,12 +20,14 @@ class ITransport;
 //
 // This is the core-side session object. It is Qt-free and single-threaded
 // from its own perspective: poll() is meant to be pumped by an owner (a Qt
-// worker thread via the adapter, or a test loop). Decoded sample frames land
+// worker thread via the adapter, or a test loop), and calls from any other
+// thread arrive through post(). Decoded sample frames land
 // in the SampleBuffer and, when recording, in the SessionWriter. Live samples
 // are published through the required DataHub in short time-based batches.
 //
 // The transport is injected, so the same session works over a real serial
-// Device or a PhantomDevice for playback.
+// Device or a PhantomDevice for playback. The session owns it: a transport is
+// created for one session and destroyed with it.
 class DeviceSession
 {
 public:
@@ -74,10 +77,9 @@ public:
                                                      int timeoutMs = 1200,
                                                      int maxAttempts = 3);
 
-    // `transport` is borrowed (not owned) unless ownTransport is true.
-    // `dataHub` is required: all decoded samples leave the session through
-    // this bus.
-    DeviceSession(ITransport *transport, DataHub *dataHub, bool ownTransport = false);
+    // The session takes `transport` over. `dataHub` is required: all decoded
+    // samples leave the session through this bus.
+    DeviceSession(std::unique_ptr<ITransport> transport, DataHub *dataHub);
     ~DeviceSession();
 
     // Rolling buffer sizing (samples kept per channel). Default ~60 s @ 4 kHz.
@@ -86,12 +88,29 @@ public:
     bool open();
     void close();
     bool isOpen() const;
+    // Why open() failed (English), empty otherwise.
+    std::string lastOpenError() const;
+    // Polling thread. Valid samples received since the session was created
+    // and frames rejected (bad CRC or a Push of the wrong length).
+    uint64_t totalSamples() const { return m_totalSamples; }
+    uint64_t rejectedFrames() const { return m_rejectedFrames; }
 
     // Pump the transport parser. Returns bytes read (>=0) or <0 on error.
+    // Commands posted from other threads run first, in the polling thread.
     int poll();
 
+    // Defer a call into the polling thread. While the poll loop runs, every
+    // call made from the GUI thread goes through here, so the session's state
+    // is touched by one thread only.
+    void post(CommandQueue::Command command) { m_queue.post(std::move(command)); }
+    // Drop commands that never reached the polling thread (the loop stopped).
+    void discardPosted() { m_queue.clear(); }
+
     // Protocol commands (thin pass-through to ApplicationProtocol).
-    int startStream(const std::vector<uint8_t> &channels, ApplicationProtocol::AckHandler onAck = {});
+    // Выбор активных каналов — отдельная постоянная настройка устройства,
+    // как усиление и частота дискретизации.
+    int setChannels(const std::vector<uint8_t> &channels, ApplicationProtocol::AckHandler onAck = {});
+    int startStream(ApplicationProtocol::AckHandler onAck = {});
     int stopStream(ApplicationProtocol::AckHandler onAck = {});
     int setSamplerate(uint8_t idx, ApplicationProtocol::AckHandler onAck = {});
     int setGain(uint8_t channel, uint8_t gainCode, ApplicationProtocol::AckHandler onAck = {});
@@ -103,6 +122,7 @@ public:
 
     // Current geometry.
     const std::vector<uint8_t> &activeChannels() const { return m_app.activeChannels(); }
+    const std::vector<uint8_t> &selectedChannels() const { return m_app.selectedChannels(); }
     int sampleRateHz() const { return m_sampleRateHz; }
     void setSampleRateHz(int hz) { m_sampleRateHz = hz; }
     // ADS1298 uses the internal, fixed 2.4 V reference.
@@ -127,8 +147,10 @@ private:
     void publishPending(size_t count);
     void flushPublishedSamples();
 
-    ITransport *m_transport = nullptr;
-    bool m_ownTransport = false;
+    // Declared before the protocol that reads and writes through it, so it is
+    // destroyed after the protocol.
+    std::unique_ptr<ITransport> m_transport;
+    CommandQueue m_queue;
     TransportProtocol m_transportProto;
     ApplicationProtocol m_app;
     SampleBuffer m_buffer;
@@ -141,6 +163,7 @@ private:
     size_t m_publishPendingSamples = 0;
     uint8_t m_publishLastSequence = 0;
     uint64_t m_totalSamples = 0;
+    uint64_t m_rejectedFrames = 0;
     size_t m_bufferCapacity = 4000 * 60; // 60 s @ 4 kHz
     int m_sampleRateHz = ApplicationProtocol::kSampleRateHz[ApplicationProtocol::kDefaultSampleRateIndex];
 };

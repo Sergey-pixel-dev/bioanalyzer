@@ -46,12 +46,17 @@ QDateTime qcpDateTimeWithSpec(const QDateTime &dateTime, Qt::TimeSpec spec)
 
 QImage qcpFlipped(const QImage &image, bool horizontal, bool vertical)
 {
+#if QT_VERSION < QT_VERSION_CHECK(6, 9, 0)
+  // QImage::flipped() appeared in Qt 6.9 (the distribution builds use 6.8).
+  return image.mirrored(horizontal, vertical);
+#else
   Qt::Orientations orientations;
   if (horizontal)
     orientations |= Qt::Horizontal;
   if (vertical)
     orientations |= Qt::Vertical;
   return image.flipped(orientations);
+#endif
 }
 }
 #endif

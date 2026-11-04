@@ -34,3 +34,6 @@ env/
 *.log
 *.tmp
 *.swp
+
+# Distributions (packaging/build-*.sh)
+/dist/
