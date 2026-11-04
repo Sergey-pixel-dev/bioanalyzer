@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "task_id": "gesture-classification",
   "display_name": "Gesture classification",
   "task_type": "classification",
@@ -14,9 +14,19 @@
   "capture": {
     "channels": [],
     "sample_rate": 2000,
-    "window_samples": 10000,
-    "stride_samples": 10000,
-    "units": "uV",
-    "scale": 0.000001
+    "units": "uV"
+  },
+  "quality": {
+    "modality": "emg",
+    "skip_ms": 500,
+    "edge_ms": 50,
+    "group_by": {"field": "label"},
+    "checks": [
+      {"id": "deviation", "params": {"threshold": 3.5, "min_group": 15}},
+      {"id": "crest", "params": {"threshold": 3.5, "min_reference": 15}},
+      {"id": "low_frequency", "params": {"cutoff_hz": 20, "threshold": 3.5, "min_reference": 15}},
+      {"id": "saturation", "params": {"margin": 0.01, "max_share": 0.001}},
+      {"id": "flat", "params": {"min_rms": 0.5}}
+    ]
   }
 }

@@ -1,198 +1,164 @@
-"""Parametric 1D CNN family for gesture and biosignal classification.
+"""Multi-scale 1D Hydra-CNN for gesture classification from surface EMG.
 
-The dataset is intentionally kept raw.  This module owns the statistics,
-outlier handling and conversion to the channel-first tensors expected by the
-network, so training and inference use exactly the same numeric domain.
+The network follows HAMSNet (Sobahi et al., Symmetry 2026, 18, 777) without
+its multi-head self-attention and squeeze-and-excitation blocks: in the
+authors' ablation the Hydra block alone was the most accurate. The dataset
+is kept raw; this module owns the preprocessing (band-pass, mains notch,
+scaling by training-set statistics) and the cutting of trials into short
+windows, so training and inference use exactly the same numeric domain.
 """
 
 import json
+import math
 import os
 import random
 
 import numpy as np
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+# Version of the network and of the preprocessing stored with the weights;
+# weights of another version are not loaded.
+ARCH = 3
+# Version of the dataset format this module reads.
+DATASET_SCHEMA = 5
+
 
 def meta():
     return {
-        "name": "Gesture 1D-CNN",
+        "name": "Gesture Hydra 1D-CNN",
         "task_type": "classification",
         "target_type": "label",
-        "output": {"kind": "top_k", "max_k": 5},
+        # What the model returns: after every training epoch the values in
+        # "training" (an axis puts a value on the chart by default), and on
+        # every window at recognition the most probable labels.
+        "outputs": {
+            "training": [
+                {"name": "train_loss", "axis": "left"},
+                {"name": "val_loss", "axis": "left"},
+                {"name": "val_accuracy", "axis": "right"},
+                {"name": "learning_rate"},
+            ],
+            "inference": {"kind": "top_k", "max_k": 5},
+        },
+        # Weights file with the best epoch; last.pt holds the last epoch with
+        # the optimizer state, from which training can be resumed.
+        "weights": "weights.pt",
+        "resume": True,
+        # Defaults after the paper: AdamW with weight decay, the learning rate
+        # falling along a cosine, batches of 256, 200 epochs, windows of 250 ms
+        # taken every 62 ms.
         "hyperparameters": [
-            {"name": "epochs", "type": "int", "min": 1, "max": 10000, "default": 50},
-            {"name": "batch_size", "type": "int", "min": 1, "max": 4096, "default": 32},
-            {
-                "name": "learning_rate",
-                "type": "float",
-                "min": 1e-7,
-                "max": 1.0,
-                "default": 1e-3,
-            },
-            {
-                "name": "validation_split",
-                "type": "float",
-                "min": 0.0,
-                "max": 0.9,
-                "default": 0.2,
-            },
-            {"name": "seed", "type": "int", "min": 0, "max": 100000, "default": 1},
-            {
-                "name": "device",
-                "type": "enum",
-                "choices": ["cpu", "cuda"],
-                "default": "cpu",
-            },
+            {"name": "epochs", "type": "int", "min": 1, "max": 10000, "default": 200},
+            {"name": "batch_size", "type": "int", "min": 1, "max": 4096, "default": 256},
+            # Small rates are shown and entered as 1e-3.
+            {"name": "learning_rate", "type": "float", "min": 1e-7, "max": 1.0, "default": 1e-3, "format": "exp"},
+            {"name": "weight_decay", "type": "float", "min": 0.0, "max": 1.0, "default": 1e-4, "format": "exp"},
+            {"name": "validation_split", "type": "float", "min": 0.0, "max": 0.9, "default": 0.2},
+            # The model input is a window of window_ms; the windows are cut from
+            # a trial every hop_ms after skip_ms from the cue: the subject's
+            # reaction and the build-up of force are not the gesture yet.
+            {"name": "window_ms", "type": "int", "min": 50, "max": 10000, "default": 250},
+            {"name": "hop_ms", "type": "int", "min": 1, "max": 10000, "default": 62},
+            {"name": "skip_ms", "type": "int", "min": 0, "max": 5000, "default": 500},
+            {"name": "notch", "type": "enum", "choices": ["50", "60", "off"], "default": "50"},
+            # -1 means "random": the worker picks a seed and writes it into the
+            # training history, so that a run can be repeated on the same split.
+            {"name": "seed", "type": "int", "min": -1, "max": 2147483647, "default": -1, "special": "random"},
+            {"name": "device", "type": "enum", "choices": ["cpu", "cuda"],
+             "default": "cuda" if torch.cuda.is_available() else "cpu"},
         ],
     }
 
 
-class CNN1D(nn.Module):
-    """The gesture network; channels and classes are inferred from a dataset."""
+class HydraCNN(nn.Module):
+    """Stem, Hydra block, 1 x 1 fusion, global average pooling and a linear layer.
 
-    def __init__(self, channels, classes):
+    The stem has two convolutions (kernels 15 and 9, 32 and 48 channels), each
+    followed by max pooling by 4; the Hydra block runs four convolutions with
+    kernels 3, 5, 9 and 15, 128 channels each, side by side; a 1 x 1
+    convolution fuses their 512 channels into 128. The branches see 47, 63, 95
+    and 143 ms of the input at 2000 Hz; about 279 thousand parameters for two
+    channels and five classes.
+    """
+
+    def __init__(self, channels, classes, width=128):
         super().__init__()
-        self.l1 = nn.Sequential(
-            nn.Conv1d(channels, 32, kernel_size=10),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-        )
-        self.l2 = nn.Sequential(
-            nn.Conv1d(32, 64, kernel_size=7, stride=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-        )
-        self.l3 = nn.Sequential(
-            nn.Conv1d(64, 128, kernel_size=5, stride=2),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-        )
-        self.l4 = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv1d(128, 128, kernel_size=3, padding=1),
-                    nn.BatchNorm1d(128),
-                    nn.ReLU(),
-                ),
-                nn.Sequential(
-                    nn.Conv1d(128, 128, kernel_size=5, padding=2),
-                    nn.BatchNorm1d(128),
-                    nn.ReLU(),
-                ),
-                nn.Sequential(
-                    nn.Conv1d(128, 128, kernel_size=15, padding=7),
-                    nn.BatchNorm1d(128),
-                    nn.ReLU(),
-                ),
+
+        def unit(inputs, outputs, kernel):
+            # The bias is redundant before batch normalization, which shifts
+            # every channel anyway.
+            return [
+                nn.Conv1d(inputs, outputs, kernel_size=kernel, padding=kernel // 2, bias=False),
+                nn.BatchNorm1d(outputs),
+                nn.ReLU(),
             ]
+
+        self.stem = nn.Sequential(
+            *unit(channels, 32, 15), nn.MaxPool1d(4),
+            *unit(32, 48, 9), nn.MaxPool1d(4),
         )
-        self.l5 = nn.Sequential(
-            nn.Conv1d(384, 64, kernel_size=1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-        )
+        self.branches = nn.ModuleList(nn.Sequential(*unit(48, width, kernel)) for kernel in (3, 5, 9, 15))
+        self.fusion = nn.Sequential(*unit(4 * width, width, 1))
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(64, classes),
+            nn.Dropout(0.2),
+            nn.Linear(width, classes),
         )
 
     def forward(self, x):
-        x = self.l1(x)
-        x = self.l2(x)
-        x = self.l3(x)
-        x = torch.cat([branch(x) for branch in self.l4], dim=1)
-        return self.head(self.l5(x))
+        x = self.stem(x)
+        x = torch.cat([branch(x) for branch in self.branches], dim=1)
+        return self.head(self.fusion(x))
 
 
-def _transform(x, fs):
-    """Apply the paper's per-window filter, denoising and normalization.
+def _notch_hz(value):
+    text = str(value if value is not None else "50").strip().lower()
+    if text in ("", "off", "none", "0"):
+        return 0.0
+    return float(text)
 
-    Per-window z-score intentionally removes amplitude as a feature (section
-    3.2.4 of the reference); rest/idle is therefore separated by waveform
-    shape only.
-    """
+
+def _filters(fs, notch_hz):
+    """Second-order sections: 20-450 Hz band-pass and an optional mains notch."""
     if fs < 1000:
         raise ValueError(
-            f"Gesture 1D-CNN requires sample_rate >= 1000 Hz for the 20-450 Hz "
-            f"band-pass; got {fs} Hz (250-Hz datasets are not supported)"
+            f"Gesture Hydra 1D-CNN requires sample_rate >= 1000 Hz for the 20-450 Hz "
+            f"band-pass; got {fs} Hz"
         )
-    values = np.asarray(x, dtype=np.float32)
-    if values.ndim != 2:
-        raise ValueError("_transform expects a (channels, samples) array")
-    channels, samples = values.shape
-    if channels <= 0 or samples <= 0:
-        return np.zeros_like(values, dtype=np.float32)
-    if samples < 4:
-        raise ValueError("_transform needs at least four samples for zero-phase filtering")
+    sections = [butter(4, [20.0, 450.0], btype="bandpass", fs=float(fs), output="sos")]
+    if notch_hz > 0.0:
+        b, a = iirnotch(notch_hz, 30.0, fs=float(fs))
+        sections.append(tf2sos(b, a))
+    return np.vstack(sections)
 
-    sos = butter(4, [20.0, 450.0], btype="bandpass", fs=float(fs), output="sos")
-    filtered = np.empty_like(values, dtype=np.float32)
-    for channel in range(channels):
-        if np.all(values[channel] == values[channel, 0]):
-            filtered[channel].fill(0.0)
-        else:
-            filtered[channel] = sosfiltfilt(sos, values[channel]).astype(
-                np.float32, copy=False
-            )
 
-    denoised = filtered.copy()
-    for channel in range(channels):
-        window = filtered[channel]
-        mean = float(window.mean(dtype=np.float64))
-        std = float(window.std(dtype=np.float64))
-        if std == 0.0:
-            continue
-        outliers = np.abs(window - mean) > 3.0 * std
-        for index in np.flatnonzero(outliers):
-            neighbours = []
-            index = int(index)
-            if index == 0:
-                neighbours.append(float(window[1]))
-            elif index == samples - 1:
-                neighbours.append(float(window[samples - 2]))
-            else:
-                for distance in (1, 2):
-                    left = index - distance
-                    right = index + distance
-                    if left >= 0:
-                        neighbours.append(float(window[left]))
-                    if right < samples:
-                        neighbours.append(float(window[right]))
-            denoised[channel, index] = (
-                np.float32(np.mean(neighbours)) if neighbours else np.float32(mean)
-            )
-
-    mean2 = denoised.mean(axis=1, keepdims=True, dtype=np.float64).astype(np.float32)
-    std2 = denoised.std(axis=1, keepdims=True, dtype=np.float64).astype(np.float32)
-    result = np.zeros_like(denoised, dtype=np.float32)
-    nonconstant = std2[:, 0] != 0.0
-    if np.any(nonconstant):
-        result[nonconstant] = (
-            (denoised[nonconstant] - mean2[nonconstant]) / std2[nonconstant]
-        ).astype(np.float32, copy=False)
-    return result
+def _filter(segments, sos):
+    """Zero-phase filtering of segments shaped (..., channels, samples)."""
+    return sosfiltfilt(sos, np.asarray(segments, dtype=np.float64), axis=-1).astype(np.float32)
 
 
 def _read_dataset(dataset):
     with open(os.path.join(dataset, "manifest.json"), encoding="utf-8") as stream:
         manifest = json.load(stream)
+    if manifest.get("schema_version") != DATASET_SCHEMA:
+        raise ValueError("the dataset format version differs from the one this model reads")
     capture = manifest.get("capture", {})
-    channel_ids = capture.get("channels", [])
-    channels = len(channel_ids)
+    channels = len(capture.get("channels", []))
     if channels <= 0:
         raise ValueError("manifest capture.channels must contain at least one channel")
     sample_rate = int(capture.get("sample_rate", 0))
     window_samples = int(capture.get("window_samples", 0))
-    paradigm = manifest.get("task", {}).get("paradigm", {})
-    prep_seconds = float(paradigm.get("prep_s", 0))
-    record_seconds = float(paradigm.get("record_s", 0))
-    cycle_samples = int(round((prep_seconds + record_seconds) * sample_rate))
+    if window_samples <= 0:
+        raise ValueError("manifest capture.window_samples must be positive")
 
+    # One example is one trial: one window from its offset in the signal file
+    # of its session. Its target may have been corrected on the
+    # Datasets page (the cue stays in "cue"); excluded trials stay on disk but
+    # are not part of the selection.
     examples = []
     labels = set()
     with open(os.path.join(dataset, "examples.jsonl"), encoding="utf-8") as stream:
@@ -200,71 +166,86 @@ def _read_dataset(dataset):
             if not line.strip():
                 continue
             item = json.loads(line)
+            if item.get("excluded"):
+                continue
             target = item.get("target", {})
             if not isinstance(target, dict) or "label" not in target:
-                raise ValueError("gesture_cnn requires target.label for every example")
+                raise ValueError("gesture_cnn requires target.label for every trial")
             label = str(target["label"])
             relative_file = item.get("file")
             if not relative_file:
-                raise ValueError("example is missing file")
-            samples = int(item.get("samples", window_samples))
-            if samples <= 0:
-                raise ValueError("example samples must be positive")
-            path = os.path.join(dataset, relative_file)
-            raw = np.fromfile(path, dtype="<i4")
-            expected = samples * channels
+                raise ValueError("trial is missing file")
+            if "offset" not in item:
+                raise ValueError("trial is missing offset")
+            offset = int(item["offset"])
+            expected = window_samples * channels
+            raw = np.fromfile(os.path.join(dataset, relative_file), dtype="<i4",
+                              count=expected, offset=offset * channels * 4)
             if raw.size != expected:
                 raise ValueError(
-                    f"{relative_file}: expected {expected} int32 values, got {raw.size}"
+                    f"{relative_file}: trial {item.get('id')} at sample {offset} is cut short: "
+                    f"expected {expected} int32 values, got {raw.size}"
                 )
-            time_major = raw.reshape(samples, channels).astype(np.float32)
-            if window_samples and samples != window_samples:
-                raise ValueError(
-                    f"{relative_file}: samples={samples} differs from manifest window_samples={window_samples}"
-                )
-            source_sample = int(item.get("source_sample", 0))
-            group = source_sample // cycle_samples if cycle_samples > 0 else len(examples)
-            examples.append({"label": label, "values": time_major, "group": group})
+            # Channel-first, as the network takes it.
+            values = raw.reshape(window_samples, channels).T.astype(np.float32)
+            examples.append({"id": int(item.get("id", len(examples))), "label": label, "values": values})
             labels.add(label)
 
     if not examples:
-        raise ValueError("dataset contains no examples")
-    if not window_samples:
-        window_samples = examples[0]["values"].shape[0]
+        raise ValueError("no trials are left in the selection of the dataset")
+    if len(labels) < 2:
+        raise ValueError("fewer than two target values are left in the selection of the dataset")
     ordered_labels = sorted(labels)
     label_to_index = {label: index for index, label in enumerate(ordered_labels)}
-    return manifest, examples, ordered_labels, label_to_index, channels, window_samples, cycle_samples
+    return manifest, examples, ordered_labels, label_to_index, channels, window_samples, sample_rate
 
 
-def _split_by_groups(examples, validation_split, seed):
-    groups = {}
+def _split_stratified(examples, validation_split, seed):
+    """Split the trials, before they are cut into segments, class by class.
+
+    Every class gives the same share of its trials to the validation part:
+    round(n * share), at least one and at most n - 1, so that each class is both
+    learned and checked. The shuffle depends on the seed only.
+    """
+    by_label = {}
     for index, example in enumerate(examples):
-        groups.setdefault(example["group"], []).append(index)
-    group_ids = list(groups)
-    if len(group_ids) <= 1 or validation_split <= 0.0:
-        return list(range(len(examples))), []
-
+        by_label.setdefault(example["label"], []).append(index)
     rng = random.Random(seed)
-    rng.shuffle(group_ids)
-    val_count = int(round(len(group_ids) * validation_split))
-    val_count = max(1, min(len(group_ids) - 1, val_count))
-    val_groups = set(group_ids[:val_count])
-    train_groups = set(group_ids[val_count:])
-
-    # Never remove the only cycle of a class from training.
-    class_groups = {}
-    for group_id, indices in groups.items():
-        class_groups.setdefault(examples[indices[0]]["label"], []).append(group_id)
-    for class_group_ids in class_groups.values():
-        if not (train_groups & set(class_group_ids)):
-            moved = next(iter(val_groups & set(class_group_ids)), None)
-            if moved is not None:
-                val_groups.remove(moved)
-                train_groups.add(moved)
-
-    train_indices = [index for group in train_groups for index in groups[group]]
-    val_indices = [index for group in val_groups for index in groups[group]]
+    train_indices, val_indices = [], []
+    for label in sorted(by_label):
+        indices = by_label[label][:]
+        rng.shuffle(indices)
+        count = 0
+        if validation_split > 0.0 and len(indices) >= 2:
+            count = min(max(int(round(len(indices) * validation_split)), 1), len(indices) - 1)
+        val_indices += indices[:count]
+        train_indices += indices[count:]
     return sorted(train_indices), sorted(val_indices)
+
+
+def _write_json_atomic(obj, path):
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as stream:
+        json.dump(obj, stream, ensure_ascii=False, indent=2)
+    os.replace(temporary, path)
+
+
+def _segments(examples, indices, label_to_index, window, hop, skip):
+    """Cut every trial into windows of `window` samples every `hop` samples
+    from the skip on."""
+    values = []
+    targets = []
+    for index in indices:
+        trial = examples[index]["values"]
+        for start in range(skip, trial.shape[1] - window + 1, hop):
+            values.append(trial[:, start:start + window])
+            targets.append(label_to_index[examples[index]["label"]])
+    return np.stack(values), np.asarray(targets, dtype=np.int64)
+
+
+def _prepare(segments, sos, scale):
+    """Filtering and scaling of segments shaped (..., channels, samples)."""
+    return _filter(segments, sos) / scale[:, None]
 
 
 def _set_seed(seed):
@@ -275,6 +256,13 @@ def _set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def _save_atomic(obj, path):
+    """Write a checkpoint so that an interruption never leaves half a file."""
+    temporary = path + ".tmp"
+    torch.save(obj, temporary)
+    os.replace(temporary, path)
+
+
 def train(dataset, output, report, config=None):
     config = config or {}
     (
@@ -283,63 +271,137 @@ def train(dataset, output, report, config=None):
         labels,
         label_to_index,
         channels,
-        window_samples,
-        cycle_samples,
+        trial_samples,
+        sample_rate,
     ) = _read_dataset(dataset)
-    sample_rate = int(_manifest.get("capture", {}).get("sample_rate", 0))
-    if sample_rate < 1000:
+    notch = _notch_hz(config.get("notch", "50"))
+    sos = _filters(sample_rate, notch)
+    # The same integer arithmetic as the application uses for the manifest.
+    window = int(config.get("window_ms", 250)) * sample_rate // 1000
+    hop = max(1, int(config.get("hop_ms", 62)) * sample_rate // 1000)
+    skip = int(config.get("skip_ms", 500)) * sample_rate // 1000
+    if window <= 0:
+        raise ValueError("the model window must contain at least one sample")
+    if skip + window > trial_samples:
         raise ValueError(
-            f"Gesture 1D-CNN requires sample_rate >= 1000 Hz for the 20-450 Hz "
-            f"band-pass; got {sample_rate} Hz (250-Hz datasets are not supported)"
+            f"the model window with the skip ({(skip + window) * 1000 // sample_rate} ms) "
+            f"is longer than a trial of the dataset ({trial_samples * 1000 // sample_rate} ms)"
         )
-    seed = int(config.get("seed", 1))
-    _set_seed(seed)
-    train_indices, val_indices = _split_by_groups(
-        examples, float(config.get("validation_split", 0.2)), seed
-    )
-    if not train_indices:
-        raise ValueError("group split produced an empty training set")
 
-    train_values = np.stack(
-        [_transform(examples[index]["values"].T, sample_rate) for index in train_indices]
-    )
-    train_tensor = torch.from_numpy(train_values)
-    train_targets = torch.tensor(
-        [label_to_index[examples[index]["label"]] for index in train_indices], dtype=torch.long
-    )
+    # Resuming: the checkpoint must come from the same network, data and
+    # preprocessing, and its seed is reused so that the trials fall into the
+    # same parts. The worker has already replaced a random seed (-1) by a value.
+    checkpoint = None
+    resume_path = str(config.get("resume") or "")
+    if resume_path:
+        if not os.path.exists(resume_path):
+            raise ValueError(f"checkpoint not found: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location="cpu")
+        if checkpoint.get("arch") != ARCH:
+            raise ValueError("the checkpoint was made by another version of the network")
+        for key, value in (("labels", labels), ("channels", channels),
+                           ("sample_rate", sample_rate), ("window_samples", window),
+                           ("skip_samples", skip), ("notch", notch)):
+            saved = checkpoint.get(key)
+            if (list(saved) if key == "labels" else saved) != value:
+                raise ValueError(f"the checkpoint was trained on other data: {key} differs "
+                                 f"({saved} instead of {value})")
+    # A resumed training keeps its seed, hence its split.
+    seed = int(checkpoint["seed"]) if checkpoint is not None else int(config.get("seed", -1))
+    if seed < 0:
+        raise ValueError("the seed is not set")
+    _set_seed(seed)
+    validation_split = float(config.get("validation_split", 0.2))
+    train_indices, val_indices = _split_stratified(examples, validation_split, seed)
+    if not train_indices:
+        raise ValueError("the split produced an empty training part")
+
+    # The windows are the same every epoch: they are filtered once.
+    values, targets = _segments(examples, train_indices, label_to_index, window, hop, skip)
+    filtered = _filter(values, sos)
+    # Every channel is divided by its RMS over the training trials. Unlike
+    # standardizing each window, this keeps both the level of activity and the
+    # ratio between the channels, by which the gestures differ.
+    if checkpoint is not None:
+        scale = np.asarray(checkpoint["scale"], dtype=np.float32)
+    else:
+        scale = np.sqrt(np.mean(np.square(filtered, dtype=np.float64), axis=(0, 2))).astype(np.float32)
+        scale[scale == 0.0] = 1.0
+    train_set = TensorDataset(torch.from_numpy(filtered / scale[:, None]), torch.from_numpy(targets))
+    del values, filtered
 
     val_tensor = None
     val_targets = None
     if val_indices:
-        val_values = np.stack(
-            [_transform(examples[index]["values"].T, sample_rate) for index in val_indices]
-        )
-        val_tensor = torch.from_numpy(val_values)
-        val_targets = torch.tensor(
-            [label_to_index[examples[index]["label"]] for index in val_indices], dtype=torch.long
-        )
+        values, targets = _segments(examples, val_indices, label_to_index, window, hop, skip)
+        val_tensor = torch.from_numpy(_prepare(values, sos, scale))
+        val_targets = torch.from_numpy(targets)
 
     requested_device = str(config.get("device", "cpu"))
     if requested_device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
     device = torch.device(requested_device)
-    model = CNN1D(channels, len(labels)).to(device)
-    loader = DataLoader(
-        TensorDataset(train_tensor, train_targets),
-        batch_size=max(1, int(config.get("batch_size", 32))),
-        shuffle=True,
-        generator=torch.Generator().manual_seed(seed),
-    )
+    model = HydraCNN(channels, len(labels)).to(device)
+    batch_size = max(1, int(config.get("batch_size", 256)))
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=float(config.get("learning_rate", 1e-3))
-    )
-    epochs = max(1, int(config.get("epochs", 50)))
+    learning_rate = float(config.get("learning_rate", 1e-3))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate,
+                                  weight_decay=float(config.get("weight_decay", 1e-4)))
+    epochs = max(1, int(config.get("epochs", 200)))
     best_val_accuracy = 0.0
+    best_val_loss = float("inf")
     final_train_loss = 0.0
     final_val_loss = 0.0
+    start_epoch = 1
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["state_dict"])
+        # The optimizer state follows the parameters to their device.
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        best_val_accuracy = float(checkpoint.get("best_val_accuracy", 0.0))
+        if start_epoch > epochs:
+            raise ValueError(f"the model is already trained for {start_epoch - 1} epochs; "
+                             f"set epochs above {start_epoch - 1} to continue")
 
-    for epoch in range(1, epochs + 1):
+    # Checkpoints are written after every epoch, so a stopped training keeps
+    # the best weights so far (weights.pt) and the last epoch (last.pt).
+    os.makedirs(output, exist_ok=True)
+    # The seed and the trials per class in each part: with the hyperparameters
+    # in the training history, enough to repeat the run on the same split.
+    def counts(indices):
+        result = {}
+        for index in indices:
+            result[examples[index]["label"]] = result.get(examples[index]["label"], 0) + 1
+        return result
+
+    training = {
+        "seed": seed,
+        "validation_split": validation_split,
+        "trials": {"training": counts(train_indices), "validation": counts(val_indices)},
+        "validation_ids": sorted(examples[index]["id"] for index in val_indices),
+        "dataset": os.path.abspath(dataset),
+    }
+    _write_json_atomic(training, os.path.join(output, "training.json"))
+    data_info = {"arch": ARCH, "labels": labels, "channels": channels,
+                 "sample_rate": sample_rate, "window_samples": window,
+                 "skip_samples": skip, "notch": notch,
+                 "scale": [float(value) for value in scale]}
+
+    for epoch in range(start_epoch, epochs + 1):
+        # Cosine annealing from the initial rate to zero over the epochs; the
+        # rate depends on the epoch only, so a resumed training follows it.
+        epoch_rate = learning_rate * 0.5 * (1.0 + math.cos(math.pi * (epoch - 1) / epochs))
+        for group in optimizer.param_groups:
+            group["lr"] = epoch_rate
+        # The shuffle depends on the seed and the epoch only, so a resumed
+        # training shuffles the windows as the uninterrupted one would.
+        loader = DataLoader(
+            train_set,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=torch.Generator().manual_seed(seed * 100003 + epoch),
+        )
         model.train()
         total_loss = 0.0
         total_items = 0
@@ -364,50 +426,52 @@ def train(dataset, output, report, config=None):
                 final_val_loss = float(criterion(logits, val_targets.to(device)).item())
                 val_accuracy = float((logits.argmax(dim=1) == val_targets.to(device)).float().mean().item())
         best_val_accuracy = max(best_val_accuracy, val_accuracy)
-        report(epoch, epochs, final_train_loss, final_val_loss, val_accuracy)
+        # Without a validation part every epoch counts as the best one.
+        improved = val_tensor is None or final_val_loss < best_val_loss
+        if val_tensor is not None and improved:
+            best_val_loss = final_val_loss
+        state_dict = {name: value.detach().cpu() for name, value in model.state_dict().items()}
+        if improved:
+            _save_atomic({"state_dict": state_dict, "epoch": epoch, "val_loss": final_val_loss,
+                          **data_info}, os.path.join(output, "weights.pt"))
+        # The epoch goes into the history before the checkpoint: an interruption
+        # in between repeats the epoch on resuming, and the history drops the
+        # repeated one, so no epoch is missing from the chart.
+        report(epoch, epochs, best=bool(improved), train_loss=final_train_loss,
+               val_loss=final_val_loss, val_accuracy=val_accuracy, learning_rate=epoch_rate)
+        _save_atomic({"state_dict": state_dict, "optimizer": optimizer.state_dict(), "epoch": epoch,
+                      "best_val_loss": best_val_loss, "best_val_accuracy": best_val_accuracy,
+                      "seed": seed, **data_info}, os.path.join(output, "last.pt"))
 
-    os.makedirs(output, exist_ok=True)
-    state_dict = {name: value.detach().cpu() for name, value in model.state_dict().items()}
-    torch.save(
-        {
-            "state_dict": state_dict,
-            "labels": labels,
-            "channels": channels,
-            "window_samples": window_samples,
-            "sample_rate": sample_rate,
-        },
-        os.path.join(output, "weights.pt"),
-    )
     return {
         "train_loss": final_train_loss,
         "val_loss": final_val_loss,
         "accuracy": best_val_accuracy,
+        "seed": seed,
     }
 
 
 def load(bundle):
     weights = torch.load(os.path.join(bundle, "weights.pt"), map_location="cpu")
+    if weights.get("arch") != ARCH:
+        raise ValueError("the model was trained by another version of the network; train it again")
     labels = list(weights["labels"])
-    network = CNN1D(int(weights["channels"]), len(labels))
+    network = HydraCNN(int(weights["channels"]), len(labels))
     network.load_state_dict(weights["state_dict"])
     # Prefer CUDA for live inference, while keeping bundles runnable on hosts
     # where the CUDA runtime or a compatible GPU is unavailable.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     network.to(device)
     network.eval()
-    sample_rate = int(weights.get("sample_rate", 0))
-    manifest_path = os.path.join(bundle, "manifest.json")
-    if os.path.exists(manifest_path):
-        with open(manifest_path, encoding="utf-8") as stream:
-            manifest = json.load(stream)
-        capture = manifest.get("capture", {})
-        sample_rate = int(capture.get("sample_rate", manifest.get("sample_rate", sample_rate)))
+    sample_rate = int(weights["sample_rate"])
     return {
         "network": network,
         "labels": labels,
         "channels": int(weights["channels"]),
-        "window_samples": int(weights.get("window_samples", 0)),
+        "window_samples": int(weights["window_samples"]),
         "sample_rate": sample_rate,
+        "sos": _filters(sample_rate, float(weights["notch"])),
+        "scale": np.asarray(weights["scale"], dtype=np.float32),
         "device": device,
     }
 
@@ -418,12 +482,15 @@ def predict(model, values, rows, channels):
     rows = int(rows or (len(values) // max(1, channels)))
     if channels != model_channels:
         raise ValueError(f"model expects {model_channels} channels, got {channels}")
+    if rows != model["window_samples"]:
+        raise ValueError(f"inference window has {rows} samples, "
+                         f"the model expects {model['window_samples']}")
     expected = rows * channels
-    if rows <= 0 or len(values) < expected:
+    if len(values) < expected:
         raise ValueError("inference window has insufficient interleaved samples")
-    time_major = np.asarray(values[:expected], dtype=np.float32).reshape(rows, channels)
-    transformed = _transform(time_major.T, model["sample_rate"])
-    tensor = torch.from_numpy(transformed.copy()).unsqueeze(0).to(model["device"])
+    segment = np.asarray(values[:expected], dtype=np.float32).reshape(rows, channels).T
+    prepared = _prepare(segment, model["sos"], model["scale"])
+    tensor = torch.from_numpy(np.ascontiguousarray(prepared)).unsqueeze(0).to(model["device"])
     with torch.no_grad():
         probabilities = torch.softmax(model["network"](tensor), dim=1)[0]
     count = min(5, len(model["labels"]))

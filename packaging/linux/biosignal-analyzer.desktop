@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Biosignal Analyzer
+Name[ru]=Анализатор биосигналов
+Exec=biosignal_analyzer
+Icon=biosignal-analyzer
+Categories=Science;MedicalSoftware;
